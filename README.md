@@ -235,6 +235,7 @@ node dist/index.js serve-gateway --port 9000   # 换个端口启动
 - **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是 AES-256-GCM 密文或 HMAC 散列，没有 `MCP_DB_ENC_KEY` 解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
 - **想换 `MCP_DB_ENC_KEY`？** 不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 `.env` 一起备份。
 - **访问有点慢？** 网关本身每次请求只花约 1-2ms。先查 TLS 握手：`curl -sk -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的IP/gateway/login`——如果 TLS 那项要几百毫秒以上，多半是用了 RSA 证书（弱 CPU 服务器上 RSA 握手签名非常慢），换成 EC 证书即可（见第 7 步命令）。TCP 快、TLS 也快但还是慢的话，就是你的网络/代理到服务器的链路延迟，代码解决不了。
+- **每次进去都卡在 "Loading plugins…"？** 这是 dsh 在加载它的 ~30 个插件脚本，而 dsh 对插件/静态资源返回的是 `no-cache`，浏览器每次都要全部重新下载。v2.0.4 起网关对 `/assets/*` 和带 `rev=` 的 `/plugins/*` 强制一年期 immutable 缓存（文件名/rev 都是内容哈希，dsh 更新会自动换新地址）。升级后**第一次访问仍会完整下载一次，之后刷新秒进**；如果升级后还慢，强刷一次浏览器（Ctrl+Shift+R）让新响应头生效。
 - **npm 装 dsh 报错（allow-scripts / node-pty）？** 跑 `npm config set allow-scripts=... --location=user` 并装 `sudo apt install build-essential`（本项目自己没这个问题，是 dsh 的依赖要编译）。
 
 ## 安全清单（都做了）

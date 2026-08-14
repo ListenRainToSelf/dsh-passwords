@@ -641,7 +641,17 @@ export function createGatewayServer(
         }
 
         // ── 非 HTML：原样流式转发 ───────────────────────────────────
-        res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+        // dsh 对插件/静态资源返回 no-cache（或不给缓存头），浏览器每次
+        // 进页面都要重新下载全部 ~30 个插件文件，导致卡在 "Loading plugins…"。
+        // rev 参数/文件名都是内容哈希（换内容即换新 URL），可安全长缓存：
+        const isHashedStatic =
+          parsedUrl.pathname.startsWith('/assets/') ||
+          (parsedUrl.pathname.startsWith('/plugins/') && parsedUrl.searchParams.has('rev'));
+        if (isHashedStatic) {
+          respHeaders['cache-control'] = 'public, max-age=31536000, immutable';
+        }
+        res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
         upstreamRes.pipe(res);
         // 上游响应流中途断开：客户端侧直接中断（头已发，不能再写错误页）
         upstreamRes.on('error', () => {
