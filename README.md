@@ -16,6 +16,20 @@ dsh 自带的网页界面没有任何登录功能——只要别人知道你的�
 - 支持 HTTPS + 80 端口自动跳转（强烈建议公网开启）
 - 登录页自动跟着 dsh 的主题走（dsh 用深色它就深色）
 
+## 界面截图
+
+| 登录页（浅色 · 跟随系统） | 登录页（深色 · 跟随 dsh 主题） |
+|---|---|
+| <img src="docs/screenshots/login-light.png" width="380"> | <img src="docs/screenshots/login-dark.png" width="380"> |
+
+| 首次配置页（首次访问） | dsh 主界面（登录后） |
+|---|---|
+| <img src="docs/screenshots/setup-page.png" width="380"> | <img src="docs/screenshots/dsh-ui.png" width="380"> |
+
+| 安全测试实测输出 | 核心源码（auth.ts） |
+|---|---|
+| <img src="docs/screenshots/terminal-test.png" width="380"> | <img src="docs/screenshots/code-auth.png" width="380"> |
+
 ## 本地先跑起来看看
 
 需要 Node.js **22.5 以上**（`node -v` 看一眼）。
@@ -220,6 +234,6 @@ node dist/index.js serve-gateway --port 9000   # 换个端口启动
 
 ## License
 
-© 2026 dsh-passwords 版权所有者。**专有软件（闭源）**，保留所有权利——详见 [LICENSE](./LICENSE)。
+[BSD 3-Clause](./LICENSE) © 2026 slywalker2006——自由使用、修改、分发，保留版权声明即可。
 
 本项目是 dsh 的独立扩展，与 DeepSeek 无隶属关系。dsh 本身按它自己的许可证（MIT）授权。
