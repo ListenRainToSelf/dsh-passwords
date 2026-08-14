@@ -1,0 +1,45 @@
+// 构建浏览器侧插件包：esbuild 把 src/client/* 打成 CJS，
+// 再包成 dsh 客户端模块系统要求的 __ModuleLoader__.load 工厂格式
+// （classic script + factory(require)，与 @linxin666 插件产物同构）。
+// 产物：dist/client.js（dsh 通过 /plugins/dsh-passwords/client.js 分发）。
+import { build } from 'esbuild';
+import { writeFileSync } from 'node:fs';
+
+const PACKAGE_ID = 'dsh-passwords';
+
+const result = await build({
+  entryPoints: ['src/client/index.tsx'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'browser',
+  target: ['es2020'],
+  jsx: 'automatic',
+  minify: true,
+  write: false,
+  // 这些由 dsh 的客户端模块图提供（__ModuleLoader__ require 解析），不能打进包里；
+  // react* 同理：dsh 前端把自己的 react 作为静态模块共享给所有插件（必须共用
+  // 同一份 React，否则 hooks 在渲染器里拿不到 dispatcher 会直接崩溃）
+  external: [
+    '@deepseek-ai/dsh-client-runtime/client',
+    '@deepseek-ai/dsh-client-ui-slots/client',
+    '@deepseek-ai/dsh-client-ui-settings/client',
+    '@deepseek-ai/dsh-client-locale/client',
+    'react*',
+  ],
+  logLevel: 'info',
+});
+
+const code = result.outputFiles[0].text;
+const wrapped = `window.__ModuleLoader__.load({
+	id: ${JSON.stringify(PACKAGE_ID)},
+	factory: (require) => {
+		var module = { exports: {} };
+		var exports = module.exports;
+		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+${code}
+		return module.exports;
+	}
+});
+`;
+writeFileSync('dist/client.js', wrapped);
+console.log('dist/client.js 构建完成');
