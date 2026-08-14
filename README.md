@@ -4,6 +4,8 @@
 
 dsh 自带的网页界面没有任何登录功能——只要别人知道你的服务器地址，打开就能用，还能烧你的 API key。这个项目在 dsh 前面挡一层登录页：没登录的人一律先看到登录页，输对账号密码才放进去。
 
+🏅 已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）。
+
 > 名字的由来：这个项目最早叫 dsh-mcp-platform（当时带 MCP 功能），后来 MCP 删了，只剩一个登录网关，就改名 dsh-passwords——好记：dsh 的密码门。
 
 ## 它做了什么
