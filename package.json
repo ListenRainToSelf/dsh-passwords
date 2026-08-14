@@ -7,6 +7,11 @@
   "bin": {
     "dsh-passwords": "dist/index.js"
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.yml"
+    }
+  },
   "license": "BSD-3-Clause",
   "engines": {
     "node": ">=22.5"
