@@ -73,7 +73,7 @@ npm install -g @deepseek-ai/dsh
 
 ```bash
 cd /opt
-git clone https://github.com/<你的账号>/dsh-passwords.git
+git clone https://github.com/slywalker2006/dsh-passwords.git
 cd dsh-passwords
 npm install
 cp .env.example .env
