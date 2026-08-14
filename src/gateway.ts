@@ -8,12 +8,13 @@ import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { type Duplex } from 'node:stream';
 import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
-import { AuthService, type RequestMeta } from './auth.js';
+import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database } from './db.js';
 
 const COOKIE_NAME = 'dsh_gateway_token';
@@ -77,6 +78,29 @@ function safeNext(next: string | undefined): string {
   if (!decoded.startsWith('/') || decoded.startsWith('//')) return '/';
   if (/[\u0000-\u0020\u007f]/.test(decoded)) return '/';
   return decoded;
+}
+
+// ── CSRF（double-submit token）────────────────────────────────
+// 登录/配置表单：GET 渲染时下发 Cookie + 表单隐藏域同一随机值，
+// POST 时恒定时间比对。无服务端会话也能防跨站表单伪造。
+const CSRF_COOKIE = 'dsh_csrf';
+
+function newCsrfToken(): string {
+  return randomBytes(16).toString('hex');
+}
+
+function csrfMatches(cookieValue: string | null, fieldValue: string): boolean {
+  if (!cookieValue || cookieValue.length !== fieldValue.length) return false;
+  return timingSafeEqual(Buffer.from(cookieValue), Buffer.from(fieldValue));
+}
+
+function setCsrfCookie(res: Response, token: string, secure: boolean): void {
+  res.setHeader(
+    'Set-Cookie',
+    `${CSRF_COOKIE}=${token}; Path=/gateway; HttpOnly; SameSite=Lax; Max-Age=3600${
+      secure ? '; Secure' : ''
+    }`,
+  );
 }
 
 // ── 主题同步：合理化跟随 dsh 主题 ─────────────────────────────
@@ -246,7 +270,7 @@ ${params.script ?? ''}
 </html>`;
 }
 
-function renderLoginPage(params: { next: string; error?: string; dbHealthy: boolean }): string {
+function renderLoginPage(params: { next: string; error?: string; dbHealthy: boolean; csrf: string }): string {
   const errorBlock = params.error
     ? `<div class="error-bar" id="error-bar">${escapeHtml(params.error)}</div>`
     : '';
@@ -260,6 +284,7 @@ function renderLoginPage(params: { next: string; error?: string; dbHealthy: bool
   <h1>登录 DeepSeek Harness</h1>
   <p class="sub">访问已受 dsh-passwords 网关保护<br/>请输入平台账号密码</p>
   <form method="POST" action="/gateway/login" id="login-form">
+    <input type="hidden" name="csrf" value="${escapeHtml(params.csrf)}" />
     <input type="hidden" name="next" value="${escapeHtml(params.next)}" />
     <label><span>用户名</span><input type="text" name="username" placeholder="你的用户名" autocomplete="username" required /></label>
     <label><span>密码</span><input type="password" name="password" placeholder="你的密码" autocomplete="current-password" required /></label>
@@ -292,7 +317,7 @@ function escapeHtml(value: string): string {
 }
 
 // ── 首次配置页（平台未初始化时显示；预设密钥 + 用户名 + 密码） ──
-function renderSetupPage(params: { error?: string }): string {
+function renderSetupPage(params: { error?: string; csrf: string }): string {
   const errorBlock = params.error
     ? `<div class="error-bar" id="error-bar">${escapeHtml(params.error)}</div>`
     : '';
@@ -301,6 +326,7 @@ function renderSetupPage(params: { error?: string }): string {
   <h1>首次配置</h1>
   <p class="sub">输入部署时预设的安装密钥，并创建管理员账号<br/>此操作只能进行一次</p>
   <form method="POST" action="/gateway/setup" id="setup-form">
+    <input type="hidden" name="csrf" value="${escapeHtml(params.csrf)}" />
     <label><span>预设密钥</span><input type="password" name="setupKey" placeholder="部署时在 .env 中设置的 SETUP_KEY" required /></label>
     <label><span>用户名</span><input type="text" name="username" placeholder="3-32 位字母数字下划线" autocomplete="username" required /></label>
     <label><span>密码</span><input type="password" name="password" id="pw" placeholder="至少 12 位，含大写、小写、数字、符号" autocomplete="new-password" required /></label>
@@ -425,11 +451,14 @@ export function createGatewayServer(
       auth.isInitialized().catch(() => false),
       db.health().catch(() => false),
     ]);
+    // 每次渲染下发新 CSRF token（Cookie + 表单隐藏域）
+    const csrf = newCsrfToken();
+    setCsrfCookie(res, csrf, config.gateway.tls !== null);
     if (!initialized) {
-      res.type('html').send(renderSetupPage({}));
+      res.type('html').send(renderSetupPage({ csrf }));
       return;
     }
-    res.type('html').send(renderLoginPage({ next, dbHealthy }));
+    res.type('html').send(renderLoginPage({ next, dbHealthy, csrf }));
   });
 
   // ── 首次配置提交（POST）→ 302 回登录页 ────────────────────────
@@ -438,12 +467,29 @@ export function createGatewayServer(
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const meta: RequestMeta = { ip: req.ip, userAgent: req.headers['user-agent'] ?? null };
+
+    // CSRF 校验（double-submit：Cookie 与表单域一致才放行）
+    const csrfField = typeof req.body?.csrf === 'string' ? req.body.csrf : '';
+    if (!csrfMatches(readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
+      const csrf = newCsrfToken();
+      setCsrfCookie(res, csrf, config.gateway.tls !== null);
+      res
+        .status(403)
+        .type('html')
+        .send(renderSetupPage({ error: '页面安全校验失败，请重新提交', csrf }));
+      return;
+    }
+
     try {
       await auth.setup({ setupKey, username, password }, meta);
       res.redirect(302, '/gateway/login');
     } catch (error) {
+      // 真实状态码：409 已初始化 / 401 密钥错误 / 400 参数错误
+      const status = error instanceof AuthError ? error.status : 400;
       const message = error instanceof Error ? error.message : '初始化失败';
-      res.type('html').send(renderSetupPage({ error: message }));
+      const csrf = newCsrfToken();
+      setCsrfCookie(res, csrf, config.gateway.tls !== null);
+      res.status(status).type('html').send(renderSetupPage({ error: message, csrf }));
     }
   });
 
@@ -453,6 +499,20 @@ export function createGatewayServer(
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
     const meta: RequestMeta = { ip: req.ip, userAgent: req.headers['user-agent'] ?? null };
+
+    // CSRF 校验（double-submit：Cookie 与表单域一致才放行）
+    const csrfField = typeof req.body?.csrf === 'string' ? req.body.csrf : '';
+    if (!csrfMatches(readCookie(req.headers.cookie, CSRF_COOKIE), csrfField)) {
+      const dbHealthy = await db.health().catch(() => false);
+      const csrf = newCsrfToken();
+      setCsrfCookie(res, csrf, config.gateway.tls !== null);
+      res
+        .status(403)
+        .type('html')
+        .send(renderLoginPage({ next, error: '页面安全校验失败，请重新提交', dbHealthy, csrf }));
+      return;
+    }
+
     try {
       const { token } = await auth.login({ username, password }, meta);
       res.setHeader(
@@ -463,9 +523,13 @@ export function createGatewayServer(
       );
       res.redirect(302, next);
     } catch (error) {
+      // 真实状态码：429 锁定 / 401 凭据错误 / 400 其他
+      const status = error instanceof AuthError ? error.status : 400;
       const message = error instanceof Error ? error.message : '登录失败';
       const dbHealthy = await db.health().catch(() => false);
-      res.type('html').send(renderLoginPage({ next, error: message, dbHealthy }));
+      const csrf = newCsrfToken();
+      setCsrfCookie(res, csrf, config.gateway.tls !== null);
+      res.status(status).type('html').send(renderLoginPage({ next, error: message, dbHealthy, csrf }));
     }
   });
 
@@ -532,6 +596,10 @@ export function createGatewayServer(
               const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
               delete respHeaders['content-length'];
               delete respHeaders['content-encoding'];
+              // 代理层补齐防嵌框头（dsh 应用自身未设置）：
+              // 允许同源内嵌（dsh 内部如有同源 iframe 不受影响），禁止跨站嵌框
+              respHeaders['x-frame-options'] = 'SAMEORIGIN';
+              respHeaders['content-security-policy'] = "frame-ancestors 'self'";
               if (encoding.includes('gzip')) {
                 out = zlib.gzipSync(out);
                 respHeaders['content-encoding'] = 'gzip';

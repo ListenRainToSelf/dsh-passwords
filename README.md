@@ -231,6 +231,9 @@ node dist/index.js serve-gateway --port 9000   # 换个端口启动
 - 开放重定向防护：`next` 参数白名单校验（拒绝 `\`、`%2F%2F`、控制字符）
 - Host 伪造防护：80 跳转目标固定用 `MCP_GATEWAY_PUBLIC_HOST`，不反射请求 Host
 - Cookie 畸形编码容错：不会因一条坏 Cookie 让整个站点 500
+- CSRF 防护：登录/配置表单 double-submit token（Cookie + 隐藏域恒定时间比对，无 token 403）
+- 真实状态码：凭据错误 401、锁定 429（不再统一 200 吞错）
+- 代理层防嵌框：dsh 应用响应补 `X-Frame-Options: SAMEORIGIN` + `frame-ancestors 'self'`
 
 ## License
 
