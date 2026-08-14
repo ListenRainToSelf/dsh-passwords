@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "dsh-passwords: a login gateway (password door) for DeepSeek Harness web UI — first-run setup, SQLite auth with at-rest encryption, rate-limit, audit log, TLS + 80-to-443 redirect",
   "type": "module",
   "main": "dist/index.js",

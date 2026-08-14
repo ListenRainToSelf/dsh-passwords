@@ -430,14 +430,36 @@ export function createGatewayServer(
   const upstreamHost = upstream.hostname;
   const upstreamPort = Number(upstream.port || 80);
 
-  /** 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效） */
+  // 上游连接池：复用与 dsh 的 TCP 连接（keep-alive），
+  // 避免每个代理请求都新建一次 TCP 握手
+  const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
+
+  /**
+   * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
+   * 性能：同一 token 的验签 + 用户存在性查询结果缓存 30 秒——每个代理
+   * 请求（含静态资源）都要走鉴权，缓存后只剩一次 Map 查找，避免逐请求
+   * 重复 JWT 验签 + SQLite 查询 + HMAC/AES。
+   */
+  const sessionCache = new Map<
+    string,
+    { user: { userId: number; username: string }; expireAt: number }
+  >();
+  const SESSION_CACHE_TTL_MS = 30_000;
+
   function sessionOf(req: Request): { userId: number; username: string } | null {
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     if (!token) return null;
+    const now = Date.now();
+    const hit = sessionCache.get(token);
+    if (hit) {
+      if (hit.expireAt > now) return hit.user;
+      sessionCache.delete(token);
+    }
     try {
       const user = auth.verifyToken(token);
-      // 用户被删除/重置后旧会话必须失效
+      // 用户被删除/重置后旧会话必须失效（缓存有效期 30 秒内生效）
       if (db.getUserByUsername(user.username) === null) return null;
+      sessionCache.set(token, { user, expireAt: now + SESSION_CACHE_TTL_MS });
       return user;
     } catch {
       return null;
@@ -577,6 +599,7 @@ export function createGatewayServer(
         path: parsedUrl.pathname + parsedUrl.search,
         method: req.method,
         headers,
+        agent: upstreamAgent,
       },
       (upstreamRes) => {
         const contentType = String(upstreamRes.headers['content-type'] ?? '');

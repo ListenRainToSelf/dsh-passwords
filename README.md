@@ -168,8 +168,9 @@ sudo ufw allow 80/tcp
 ```bash
 cd /opt/dsh-passwords
 
-# 1) 自签证书（IP 换成你的服务器 IP；有域名建议用 Let's Encrypt）
-openssl req -x509 -newkey rsa:2048 -keyout tls.key -out tls.crt \
+# 1) 自签证书（用 EC 椭圆曲线，别用 RSA！RSA 握手在弱 CPU 服务器上可能要 1 秒以上，
+#    EC 只要几毫秒；IP 换成你的服务器 IP；有域名建议用 Let's Encrypt）
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout tls.key -out tls.crt \
   -days 825 -nodes -subj "/CN=你的IP" -addext "subjectAltName=IP:你的IP"
 chmod 600 tls.key
 
@@ -185,6 +186,23 @@ sudo ufw allow 443/tcp   # 安全组同样要放行 443
 ```
 
 之后 `http://` 会自动跳到 `https://`。自签证书浏览器第一次会提示不安全，点"继续前往"就行。
+
+## dsh 怎么启动（重要）
+
+dsh 和网关是**两个独立进程**，都要跑起来才能用。启动 dsh 的命令：
+
+```bash
+DEEPSEEK_API_KEY=sk-你的key dsh web --patch /opt/dsh-passwords/cordis.yml
+```
+
+两个参数说明：
+
+- `DEEPSEEK_API_KEY=...`：**必填**。dsh 调模型用的 API key。
+- `--patch .../cordis.yml`：**远程访问时强烈建议加**。不加的话，网页上点"添加工作区"会尝试弹出**你电脑本地**的系统文件夹选择器——但你是远程访问服务器的，浏览器根本弹不出本机选择器，表现就是点添加工作区没反应/报错（`pickDirectory` 失败）。加上这个参数后，点"添加工作区"会在网页内弹出**服务器目录浏览器**，直接浏览并选择服务器上的文件夹（也能手动输入绝对路径，比如 `/opt/myapp`）。
+
+不想每次敲参数：把 `cordis.yml` 的内容合并进 `~/.dsh/profiles/web/cordis.patch.yml`，之后直接 `dsh web` 就永久生效。
+
+> 上面第 4 步的 systemd 配置里已经带上了 `--patch`，跟着教程走就不用管这节。
 
 ## 配置速查表
 
@@ -216,6 +234,7 @@ node dist/index.js serve-gateway --port 9000   # 换个端口启动
 - **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
 - **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是 AES-256-GCM 密文或 HMAC 散列，没有 `MCP_DB_ENC_KEY` 解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
 - **想换 `MCP_DB_ENC_KEY`？** 不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 `.env` 一起备份。
+- **访问有点慢？** 网关本身每次请求只花约 1-2ms。先查 TLS 握手：`curl -sk -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的IP/gateway/login`——如果 TLS 那项要几百毫秒以上，多半是用了 RSA 证书（弱 CPU 服务器上 RSA 握手签名非常慢），换成 EC 证书即可（见第 7 步命令）。TCP 快、TLS 也快但还是慢的话，就是你的网络/代理到服务器的链路延迟，代码解决不了。
 - **npm 装 dsh 报错（allow-scripts / node-pty）？** 跑 `npm config set allow-scripts=... --location=user` 并装 `sudo apt install build-essential`（本项目自己没这个问题，是 dsh 的依赖要编译）。
 
 ## 安全清单（都做了）

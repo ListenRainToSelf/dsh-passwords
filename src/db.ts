@@ -7,7 +7,10 @@
 //   - login_attempts         → 只存 username_hash/ip_hash（HMAC，不可逆）
 //   密码始终只存 bcrypt 哈希（不可逆，无明文，无需加密）。
 //   旧明文数据在 init() 时一次性自动迁移为密文（幂等，检测 v1:/h1: 前缀）。
-import { DatabaseSync } from 'node:sqlite';
+//
+// 性能：预处理语句按 SQL 文本缓存（每个代理请求都要查询会话，
+// 避免逐请求重复编译 SQL 的开销）。
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
@@ -67,11 +70,22 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 export class Database {
   private db: DatabaseSync;
   private crypto: FieldCrypto;
+  /** 预处理语句缓存：按 SQL 文本复用，避免每次请求重复编译 */
+  private stmts = new Map<string, StatementSync>();
 
   constructor(dbPath: string, crypto: FieldCrypto) {
     mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.crypto = crypto;
+  }
+
+  private stmt(sql: string): StatementSync {
+    let s = this.stmts.get(sql);
+    if (!s) {
+      s = this.db.prepare(sql);
+      this.stmts.set(sql, s);
+    }
+    return s;
   }
 
   /** 建表（幂等）+ 旧明文数据一次性迁移为密文 */
@@ -96,7 +110,7 @@ export class Database {
 
   // ── 迁移：users.username 明文 → 密文 + username_hash ──────────
   private migrateUsers(): boolean {
-    const cols = this.db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+    const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'username_hash')) {
       this.db.exec('ALTER TABLE users ADD COLUMN username_hash TEXT');
     }
@@ -104,10 +118,12 @@ export class Database {
     this.db.exec(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hash ON users(username_hash) WHERE username_hash IS NOT NULL',
     );
-    const rows = this.db
-      .prepare('SELECT id, username, username_hash FROM users')
-      .all() as { id: number; username: string; username_hash: string | null }[];
-    const upd = this.db.prepare('UPDATE users SET username = ?, username_hash = ? WHERE id = ?');
+    const rows = this.stmt('SELECT id, username, username_hash FROM users').all() as {
+      id: number;
+      username: string;
+      username_hash: string | null;
+    }[];
+    const upd = this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?');
     let changed = false;
     for (const row of rows) {
       const plain = row.username.startsWith('v1:') ? this.crypto.decrypt(row.username) : row.username;
@@ -128,10 +144,14 @@ export class Database {
 
   // ── 迁移：audit_logs 敏感列明文 → 密文 ─────────────────────────
   private migrateAuditLogs(): boolean {
-    const rows = this.db
-      .prepare('SELECT id, username, ip, user_agent, detail FROM audit_logs')
-      .all() as { id: number; username: string | null; ip: string | null; user_agent: string | null; detail: string | null }[];
-    const upd = this.db.prepare(
+    const rows = this.stmt('SELECT id, username, ip, user_agent, detail FROM audit_logs').all() as {
+      id: number;
+      username: string | null;
+      ip: string | null;
+      user_agent: string | null;
+      detail: string | null;
+    }[];
+    const upd = this.stmt(
       'UPDATE audit_logs SET username = ?, ip = ?, user_agent = ?, detail = ? WHERE id = ?',
     );
     let changed = false;
@@ -160,11 +180,17 @@ export class Database {
 
   // ── 迁移：login_attempts 明文 username/ip → HMAC 散列 ─────────
   private migrateLoginAttempts(): boolean {
-    const cols = this.db.prepare('PRAGMA table_info(login_attempts)').all() as { name: string }[];
+    const cols = this.stmt('PRAGMA table_info(login_attempts)').all() as { name: string }[];
     if (cols.some((c) => c.name === 'username_hash')) return false; // 已迁移
-    const rows = this.db
-      .prepare('SELECT username, ip, failed_count, locked_until, updated_at FROM login_attempts')
-      .all() as { username: string; ip: string | null; failed_count: number; locked_until: string | null; updated_at: string }[];
+    const rows = this.stmt(
+      'SELECT username, ip, failed_count, locked_until, updated_at FROM login_attempts',
+    ).all() as {
+      username: string;
+      ip: string | null;
+      failed_count: number;
+      locked_until: string | null;
+      updated_at: string;
+    }[];
     this.db.exec('BEGIN');
     try {
       this.db.exec(`
@@ -178,7 +204,7 @@ export class Database {
           UNIQUE(username_hash, ip_hash)
         );
       `);
-      const ins = this.db.prepare(
+      const ins = this.stmt(
         'INSERT INTO login_attempts_new (username_hash, ip_hash, failed_count, locked_until, updated_at) VALUES (?, ?, ?, ?, ?)',
       );
       for (const row of rows) {
@@ -202,7 +228,7 @@ export class Database {
 
   async health(): Promise<boolean> {
     try {
-      this.db.prepare('SELECT 1').get();
+      this.stmt('SELECT 1').get();
       return true;
     } catch {
       return false;
@@ -211,24 +237,22 @@ export class Database {
 
   getUserByUsername(username: string): UserRow | null {
     const hash = this.crypto.lookupHash(username);
-    const row = this.db
-      .prepare(
-        'SELECT id, username, password_hash, created_at, last_login_at FROM users WHERE username_hash = ?',
-      )
-      .get(hash) as Omit<UserRow, 'username'> & { username: string } | undefined;
+    const row = this.stmt(
+      'SELECT id, username, password_hash, created_at, last_login_at FROM users WHERE username_hash = ?',
+    ).get(hash) as Omit<UserRow, 'username'> & { username: string } | undefined;
     if (!row) return null;
     return { ...row, username: this.crypto.decrypt(row.username) ?? username };
   }
 
   countUsers(): number {
-    const row = this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
+    const row = this.stmt('SELECT COUNT(*) AS n FROM users').get() as { n: number };
     return Number(row?.n ?? 0);
   }
 
   createUser(username: string, passwordHash: string): UserRow {
-    const result = this.db
-      .prepare('INSERT INTO users (username, username_hash, password_hash) VALUES (?, ?, ?)')
-      .run(this.crypto.encrypt(username), this.crypto.lookupHash(username), passwordHash);
+    const result = this.stmt(
+      'INSERT INTO users (username, username_hash, password_hash) VALUES (?, ?, ?)',
+    ).run(this.crypto.encrypt(username), this.crypto.lookupHash(username), passwordHash);
     return {
       id: Number(result.lastInsertRowid),
       username,
@@ -239,20 +263,20 @@ export class Database {
   }
 
   touchLogin(userId: number): void {
-    this.db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(userId);
+    this.stmt("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(userId);
   }
 
   getSetting(key: string): string | null {
-    const row = this.db.prepare('SELECT v FROM platform_settings WHERE k = ?').get(key) as
+    const row = this.stmt('SELECT v FROM platform_settings WHERE k = ?').get(key) as
       | { v: string }
       | undefined;
     return row ? String(row.v) : null;
   }
 
   setSetting(key: string, value: string): void {
-    this.db
-      .prepare('INSERT INTO platform_settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v')
-      .run(key, value);
+    this.stmt(
+      'INSERT INTO platform_settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v',
+    ).run(key, value);
   }
 
   // ── 网络安全审查：审计日志（敏感字段静态加密） ────────────────
@@ -261,26 +285,24 @@ export class Database {
     opts: { username?: string | null; ip?: string | null; userAgent?: string | null; detail?: string | null } = {},
   ): void {
     try {
-      this.db
-        .prepare('INSERT INTO audit_logs (event_type, username, ip, user_agent, detail) VALUES (?, ?, ?, ?, ?)')
-        .run(
-          eventType,
-          this.crypto.encrypt(opts.username ?? null),
-          this.crypto.encrypt(opts.ip ?? null),
-          this.crypto.encrypt(opts.userAgent ?? null),
-          this.crypto.encrypt(opts.detail ?? null),
-        );
+      this.stmt(
+        'INSERT INTO audit_logs (event_type, username, ip, user_agent, detail) VALUES (?, ?, ?, ?, ?)',
+      ).run(
+        eventType,
+        this.crypto.encrypt(opts.username ?? null),
+        this.crypto.encrypt(opts.ip ?? null),
+        this.crypto.encrypt(opts.userAgent ?? null),
+        this.crypto.encrypt(opts.detail ?? null),
+      );
     } catch {
       // 审计写入失败不阻断主流程
     }
   }
 
   listAuditLogs(limit = 30): AuditLogRow[] {
-    const rows = this.db
-      .prepare(
-        'SELECT id, event_type, username, ip, user_agent, detail, created_at FROM audit_logs ORDER BY id DESC LIMIT ?',
-      )
-      .all(Math.min(Math.max(limit, 1), 100)) as unknown as AuditLogRow[];
+    const rows = this.stmt(
+      'SELECT id, event_type, username, ip, user_agent, detail, created_at FROM audit_logs ORDER BY id DESC LIMIT ?',
+    ).all(Math.min(Math.max(limit, 1), 100)) as unknown as AuditLogRow[];
     return rows.map((row) => ({
       ...row,
       username: this.crypto.decrypt(row.username),
@@ -292,11 +314,9 @@ export class Database {
 
   // ── 网络安全审查：防暴力破解（仅存 HMAC 散列，不含明文） ────────
   getLoginAttempt(username: string, ip: string): { failed_count: number; locked_until: Date | null } | null {
-    const row = this.db
-      .prepare(
-        'SELECT failed_count, locked_until FROM login_attempts WHERE username_hash = ? AND ip_hash = ?',
-      )
-      .get(this.crypto.lookupHash(username), this.crypto.lookupHash(ip)) as
+    const row = this.stmt(
+      'SELECT failed_count, locked_until FROM login_attempts WHERE username_hash = ? AND ip_hash = ?',
+    ).get(this.crypto.lookupHash(username), this.crypto.lookupHash(ip)) as
       | { failed_count: number; locked_until: string | null }
       | undefined;
     return row
@@ -305,27 +325,24 @@ export class Database {
   }
 
   recordLoginFailure(username: string, ip: string): number {
-    this.db
-      .prepare(
-        `INSERT INTO login_attempts (username_hash, ip_hash, failed_count) VALUES (?, ?, 1)
-         ON CONFLICT(username_hash, ip_hash) DO UPDATE SET failed_count = failed_count + 1`,
-      )
-      .run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip));
+    this.stmt(
+      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count) VALUES (?, ?, 1)
+       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET failed_count = failed_count + 1`,
+    ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip));
     return this.getLoginAttempt(username, ip)?.failed_count ?? 1;
   }
 
   lockLoginAttempt(username: string, ip: string, until: Date): void {
-    this.db
-      .prepare(
-        `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, locked_until) VALUES (?, ?, 0, ?)
-         ON CONFLICT(username_hash, ip_hash) DO UPDATE SET locked_until = excluded.locked_until`,
-      )
-      .run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip), until.toISOString());
+    this.stmt(
+      `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, locked_until) VALUES (?, ?, 0, ?)
+       ON CONFLICT(username_hash, ip_hash) DO UPDATE SET locked_until = excluded.locked_until`,
+    ).run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip), until.toISOString());
   }
 
   resetLoginAttempts(username: string, ip: string): void {
-    this.db
-      .prepare('DELETE FROM login_attempts WHERE username_hash = ? AND ip_hash = ?')
-      .run(this.crypto.lookupHash(username), this.crypto.lookupHash(ip));
+    this.stmt('DELETE FROM login_attempts WHERE username_hash = ? AND ip_hash = ?').run(
+      this.crypto.lookupHash(username),
+      this.crypto.lookupHash(ip),
+    );
   }
 }
