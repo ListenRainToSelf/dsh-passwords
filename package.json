@@ -1,0 +1,53 @@
+{
+  "name": "dsh-passwords",
+  "version": "2.0.0",
+  "description": "dsh-passwords: a login gateway (password door) for DeepSeek Harness web UI — first-run setup, SQLite auth with at-rest encryption, rate-limit, audit log, TLS + 80-to-443 redirect",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "dsh-passwords": "dist/index.js"
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "gateway",
+    "auth",
+    "login",
+    "password",
+    "extension"
+  ],
+  "files": [
+    "dist/",
+    "cordis.yml",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<your-account>/dsh-passwords.git"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js serve-gateway",
+    "start:gateway": "node dist/index.js serve-gateway"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}
