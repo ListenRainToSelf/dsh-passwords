@@ -1,12 +1,18 @@
-// .env 加载：相对模块位置（而不是进程 cwd）解析项目根目录 .env。
+// .env 加载：优先读 DSH_PASSWORDS_ENV_FILE（dsh 插件进程用，与网关共享同一份 .env），
+// 否则相对模块位置解析项目根目录 .env。
 // 这样无论从哪个目录运行（systemd WorkingDirectory、npm start、
-// 任意目录下的 audit CLI）都读到同一份配置与同一把密钥。
+// 任意目录下的 CLI）都读到同一份配置与同一把密钥。
 import { config as loadEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+// dsh 进程里没有本项目的 .env（通过 DSH_PASSWORDS_ENV_FILE 显式指定网关 .env 路径）
+const explicitEnvFile = process.env.DSH_PASSWORDS_ENV_FILE?.trim();
+if (explicitEnvFile) {
+  loadEnv({ path: explicitEnvFile, quiet: true });
+}
 loadEnv({ path: path.join(moduleDir, '..', '.env'), quiet: true });
 
 function readEnv(name: string, fallback: string): string {
@@ -32,13 +38,27 @@ export interface PlatformConfig {
     publicHost: string;
   };
   jwtSecret: string;
+  /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */
+  internalSecret: string;
+  /** 远程设置补丁（settings host 模式 + 白名单）管理配置；补丁强制启用，无开关 */
+  patch: {
+    /** dsh 安装根目录（@deepseek-ai/dsh 所在位置）；留空自动探测 npm root -g */
+    dshRoot: string;
+    /** 补丁应用后要重启的 dsh systemd 服务名；留空则不自动重启 */
+    restartService: string;
+  };
 }
 
 export function loadConfig(): PlatformConfig {
+  const setupKey = readEnv('SETUP_KEY', '');
   // JWT 密钥：留空则用 setupKey 做稳定派生，重启不失效
   const jwtSecret =
     readEnv('MCP_JWT_SECRET', '') ||
     createHash('sha256').update(readEnv('SETUP_KEY', 'dev')).digest('hex');
+  // 内部接口密钥：与 JWT 域分离派生，插件→网关的通知通道用
+  const internalSecret =
+    readEnv('MCP_INTERNAL_SECRET', '') ||
+    createHash('sha256').update('dshpw-internal:' + readEnv('SETUP_KEY', 'dev')).digest('hex');
 
   const dbPath = readEnv(
     'MCP_DB_PATH',
@@ -46,7 +66,7 @@ export function loadConfig(): PlatformConfig {
   );
 
   return {
-    setupKey: readEnv('SETUP_KEY', ''),
+    setupKey,
     dbPath,
     dbEncKey: readEnv('MCP_DB_ENC_KEY', ''),
     gateway: {
@@ -67,5 +87,10 @@ export function loadConfig(): PlatformConfig {
       publicHost: readEnv('MCP_GATEWAY_PUBLIC_HOST', ''),
     },
     jwtSecret,
+    internalSecret,
+    patch: {
+      dshRoot: readEnv('MCP_DSH_ROOT', ''),
+      restartService: readEnv('MCP_DSH_RESTART_SERVICE', 'dsh-web'),
+    },
   };
 }

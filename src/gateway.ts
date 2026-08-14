@@ -16,6 +16,7 @@ import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database } from './db.js';
+import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 
 const COOKIE_NAME = 'dsh_gateway_token';
 
@@ -457,8 +458,10 @@ export function createGatewayServer(
     }
     try {
       const user = auth.verifyToken(token);
-      // 用户被删除/重置后旧会话必须失效（缓存有效期 30 秒内生效）
-      if (db.getUserByUsername(user.username) === null) return null;
+      // 用户被删除/重置/改密后旧会话必须失效（缓存有效期 30 秒内生效）
+      const row = db.getUserByUsername(user.username);
+      if (row === null) return null;
+      if (user.cv !== row.credential_version) return null;
       sessionCache.set(token, { user, expireAt: now + SESSION_CACHE_TTL_MS });
       return user;
     } catch {
@@ -559,6 +562,34 @@ export function createGatewayServer(
   app.get('/gateway/logout', (_req, res) => {
     res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0`);
     res.redirect(302, '/gateway/login');
+  });
+
+  // ── 内部接口：dsh 插件通知网关重载远程设置补丁 ───────────────
+  // 仅限本机 dsh 插件调用（恒定时间比对内部密钥；密钥由 SETUP_KEY 派生，
+  // 泄漏面与安装密钥一致）。响应立即返回，补丁应用与 dsh 重启异步进行，
+  // 让设置页的响应先刷给浏览器。补丁强制启用，无开关。
+  app.post('/gateway/internal/patch', express.json({ limit: '4kb' }), (req, res) => {
+    const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+    const expected = config.internalSecret;
+    const a = Buffer.from(secret);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
+    res.status(202).json({ ok: true });
+    setTimeout(() => {
+      try {
+        const root = findDshRoot(config.patch.dshRoot);
+        if (!root) return;
+        const result = applyRemotePatch(root);
+        if (result === 'applied' && config.patch.restartService) {
+          restartDshWeb(config.patch.restartService, 2500);
+        }
+      } catch (error) {
+        console.error('[dsh-passwords] 补丁重载失败:', error);
+      }
+    }, 500);
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────

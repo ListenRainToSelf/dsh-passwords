@@ -18,3 +18,7 @@
     # 前端：应用内选择工作区目录对话框
     - id: ui-directory-picker-browse
       name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+    # dsh-passwords 主机侧插件：设置命名空间 + 用户管理路由
+    # （需把本项目加入 dsh profile 依赖：pnpm add /opt/dsh-passwords）
+    - id: dsh-passwords
+      name: 'dsh-passwords'

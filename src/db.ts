@@ -15,10 +15,24 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
 
+export type UserRole = 'admin' | 'user';
+
 export interface UserRow {
   id: number;
   username: string;
   password_hash: string;
+  role: UserRole;
+  /** 改密时 +1：旧 JWT（签入时的版本号）立即失效 */
+  credential_version: number;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+/** 用户列表条目（已解密的展示字段） */
+export interface UserListRow {
+  id: number;
+  username: string;
+  role: UserRole;
   created_at: string;
   last_login_at: string | null;
 }
@@ -35,12 +49,14 @@ export interface AuditLogRow {
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  username      TEXT    NOT NULL,
-  username_hash TEXT,
-  password_hash TEXT    NOT NULL,
-  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
-  last_login_at TEXT
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  username           TEXT    NOT NULL,
+  username_hash      TEXT,
+  password_hash      TEXT    NOT NULL,
+  role               TEXT    NOT NULL DEFAULT 'user',
+  credential_version INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+  last_login_at      TEXT
 );
 CREATE TABLE IF NOT EXISTS platform_settings (
   k TEXT PRIMARY KEY,
@@ -77,6 +93,8 @@ export class Database {
     mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.crypto = crypto;
+    // 网关进程与 dsh 插件进程共享同一个库文件：写锁竞争时等待而不是立刻报错
+    this.db.exec('PRAGMA busy_timeout = 5000');
   }
 
   private stmt(sql: string): StatementSync {
@@ -93,6 +111,7 @@ export class Database {
     // 删除内容清零，防止已删除的明文残留在空闲页可被文件扫描恢复
     this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(SCHEMA);
+    this.migrateRoles();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -105,6 +124,23 @@ export class Database {
     if (changed || !vacuumed) {
       this.db.exec('VACUUM');
       this.setSetting('enc_migrated_v1', '1');
+    }
+  }
+
+  // ── 迁移：role / credential_version 列补齐 + 首个用户升级为主用户 ──
+  private migrateRoles(): void {
+    const cols = this.stmt('PRAGMA table_info(users)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'role')) {
+      this.db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'");
+    }
+    if (!cols.some((c) => c.name === 'credential_version')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0');
+    }
+    // 若库中还没有主用户（老数据迁移/异常状态），把最早创建的账号提为主用户；
+    // 其余账号保持子用户角色。判断只看 role 字段，与账号叫什么名字无关。
+    const hasAdmin = this.stmt("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").get();
+    if (!hasAdmin) {
+      this.db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)");
     }
   }
 
@@ -238,10 +274,32 @@ export class Database {
   getUserByUsername(username: string): UserRow | null {
     const hash = this.crypto.lookupHash(username);
     const row = this.stmt(
-      'SELECT id, username, password_hash, created_at, last_login_at FROM users WHERE username_hash = ?',
+      'SELECT id, username, password_hash, role, credential_version, created_at, last_login_at FROM users WHERE username_hash = ?',
     ).get(hash) as Omit<UserRow, 'username'> & { username: string } | undefined;
     if (!row) return null;
     return { ...row, username: this.crypto.decrypt(row.username) ?? username };
+  }
+
+  getUserById(id: number): UserRow | null {
+    const row = this.stmt(
+      'SELECT id, username, password_hash, role, credential_version, created_at, last_login_at FROM users WHERE id = ?',
+    ).get(id) as Omit<UserRow, 'username'> & { username: string } | undefined;
+    if (!row) return null;
+    return { ...row, username: this.crypto.decrypt(row.username) ?? '' };
+  }
+
+  /** 用户列表（用户名已解密），按创建顺序 */
+  listUsers(): UserListRow[] {
+    const rows = this.stmt(
+      'SELECT id, username, role, created_at, last_login_at FROM users ORDER BY id ASC',
+    ).all() as (Omit<UserListRow, 'username'> & { username: string })[];
+    return rows.map((row) => ({
+      id: row.id,
+      username: this.crypto.decrypt(row.username) ?? '',
+      role: row.role === 'admin' ? 'admin' : 'user',
+      created_at: row.created_at,
+      last_login_at: row.last_login_at,
+    }));
   }
 
   countUsers(): number {
@@ -249,21 +307,50 @@ export class Database {
     return Number(row?.n ?? 0);
   }
 
-  createUser(username: string, passwordHash: string): UserRow {
+  createUser(username: string, passwordHash: string, role: UserRole = 'user'): UserRow {
     const result = this.stmt(
-      'INSERT INTO users (username, username_hash, password_hash) VALUES (?, ?, ?)',
-    ).run(this.crypto.encrypt(username), this.crypto.lookupHash(username), passwordHash);
+      'INSERT INTO users (username, username_hash, password_hash, role) VALUES (?, ?, ?, ?)',
+    ).run(this.crypto.encrypt(username), this.crypto.lookupHash(username), passwordHash, role);
     return {
       id: Number(result.lastInsertRowid),
       username,
       password_hash: passwordHash,
+      role,
+      credential_version: 0,
       created_at: new Date().toISOString(),
       last_login_at: null,
     };
   }
 
+  /** 改名（用户名密文 + 等值索引一起更新） */
+  updateUsername(id: number, username: string): void {
+    this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?').run(
+      this.crypto.encrypt(username),
+      this.crypto.lookupHash(username),
+      id,
+    );
+  }
+
+  /** 改密：credential_version +1，旧会话（签入时版本号）立即失效 */
+  updatePasswordHash(id: number, passwordHash: string): void {
+    this.stmt(
+      'UPDATE users SET password_hash = ?, credential_version = credential_version + 1 WHERE id = ?',
+    ).run(passwordHash, id);
+  }
+
+  deleteUser(id: number): void {
+    this.stmt('DELETE FROM users WHERE id = ?').run(id);
+  }
+
   touchLogin(userId: number): void {
     this.stmt("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(userId);
+  }
+
+  /** 登录失败锁定清理目标也同步抹掉（删除用户时调用） */
+  clearLoginAttemptsOf(username: string): void {
+    this.stmt('DELETE FROM login_attempts WHERE username_hash = ?').run(
+      this.crypto.lookupHash(username),
+    );
   }
 
   getSetting(key: string): string | null {

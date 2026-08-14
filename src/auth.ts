@@ -46,7 +46,7 @@ export function assertNoSqlInjection(value: unknown, field: string): void {
   }
 }
 
-function assertUsername(username: unknown): string {
+export function assertUsername(username: unknown): string {
   if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
     throw new AuthError(
       '用户名需为 3-32 位字母、数字、下划线或连字符',
@@ -56,7 +56,7 @@ function assertUsername(username: unknown): string {
   return username;
 }
 
-function assertPassword(password: unknown): string {
+export function assertPassword(password: unknown): string {
   if (typeof password !== 'string' || !PASSWORD_RE.test(password)) {
     throw new AuthError(
       '密码需至少 12 位，且必须同时包含大写字母、小写字母、数字、符号各至少一位',
@@ -69,6 +69,13 @@ function assertPassword(password: unknown): string {
 export interface RequestMeta {
   ip?: string | null;
   userAgent?: string | null;
+}
+
+/** 已认证调用方（dsh 插件路由从网关 JWT cookie 解析出的身份） */
+export interface AuthedUser {
+  userId: number;
+  username: string;
+  role: 'admin' | 'user';
 }
 
 export class AuthService {
@@ -108,7 +115,8 @@ export class AuthService {
     const password = assertPassword(input.password);
 
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-    await this.db.createUser(username, hash);
+    // 首次配置创建的是主用户（admin 角色），后续子用户由主用户在设置页分配
+    await this.db.createUser(username, hash, 'admin');
     await this.db.setSetting('installed_at', new Date().toISOString());
     await this.db.audit('setup_success', {
       username,
@@ -179,18 +187,19 @@ export class AuthService {
     await this.db.audit('login_success', { username, ip, userAgent: meta.userAgent });
 
     const token = jwt.sign(
-      { sub: String(user.id), username: user.username },
+      { sub: String(user.id), username: user.username, cv: user.credential_version },
       this.config.jwtSecret,
       { expiresIn: TOKEN_TTL },
     );
     return { token, username: user.username };
   }
 
-  /** 校验 JWT（Web 中间件用） */
-  verifyToken(token: string): { userId: number; username: string } {
+  /** 校验 JWT（Web 中间件用）；cv 为签入时的凭据版本，改密后旧 token 失效 */
+  verifyToken(token: string): { userId: number; username: string; cv: number } {
     try {
       const payload = jwt.verify(token, this.config.jwtSecret) as jwt.JwtPayload;
-      return { userId: Number(payload.sub), username: String(payload.username) };
+      const cv = typeof payload.cv === 'number' ? payload.cv : 0;
+      return { userId: Number(payload.sub), username: String(payload.username), cv };
     } catch {
       throw new AuthError('会话无效或已过期', 'INVALID_TOKEN', 401);
     }
@@ -204,5 +213,108 @@ export class AuthService {
     } catch {
       return { ok: false };
     }
+  }
+
+  // ── 用户管理（dsh 设置页卡片调用） ────────────────────────────
+
+  /** 改密：本人可改自己；主用户可重置任何人。改后旧会话全部失效。 */
+  async changePassword(
+    caller: AuthedUser,
+    target: string,
+    newPassword: string,
+    meta: RequestMeta = {},
+  ): Promise<void> {
+    const targetUser = await this.db.getUserByUsername(target.trim());
+    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (caller.role !== 'admin' && caller.username !== targetUser.username) {
+      throw new AuthError('只有主用户可以修改他人密码', 'FORBIDDEN', 403);
+    }
+    const password = assertPassword(newPassword);
+    const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    await this.db.updatePasswordHash(targetUser.id, hash);
+    await this.db.audit('password_changed', {
+      username: targetUser.username,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail:
+        caller.username === targetUser.username
+          ? '用户自助修改密码'
+          : `由主用户 ${caller.username} 重置`,
+    });
+  }
+
+  /** 改名：本人可改自己；主用户可改任何人。改名后旧会话失效（需重新登录）。 */
+  async renameUser(
+    caller: AuthedUser,
+    target: string,
+    newUsername: string,
+    meta: RequestMeta = {},
+  ): Promise<void> {
+    const targetUser = await this.db.getUserByUsername(target.trim());
+    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (caller.role !== 'admin' && caller.username !== targetUser.username) {
+      throw new AuthError('只有主用户可以修改他人用户名', 'FORBIDDEN', 403);
+    }
+    const username = assertUsername(newUsername);
+    assertNoSqlInjection(username, 'username');
+    if (this.db.getUserByUsername(username) !== null) {
+      throw new AuthError('该用户名已被使用', 'USERNAME_TAKEN', 409);
+    }
+    await this.db.updateUsername(targetUser.id, username);
+    await this.db.audit('username_changed', {
+      username: targetUser.username,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail:
+        caller.username === targetUser.username
+          ? `自助改名 → ${username}`
+          : `由主用户 ${caller.username} 改名 → ${username}`,
+    });
+  }
+
+  /** 新增子用户（仅主用户） */
+  async addSubUser(
+    caller: AuthedUser,
+    username: string,
+    password: string,
+    meta: RequestMeta = {},
+  ): Promise<void> {
+    if (caller.role !== 'admin') throw new AuthError('只有主用户可以分配子用户', 'FORBIDDEN', 403);
+    const name = assertUsername(username);
+    assertNoSqlInjection(name, 'username');
+    if (this.db.getUserByUsername(name) !== null) {
+      throw new AuthError('该用户名已被使用', 'USERNAME_TAKEN', 409);
+    }
+    const pw = assertPassword(password);
+    const hash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
+    await this.db.createUser(name, hash, 'user');
+    await this.db.audit('subuser_created', {
+      username: name,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: `由主用户 ${caller.username} 创建`,
+    });
+  }
+
+  /** 删除子用户（仅主用户；不能删除自己） */
+  async removeUser(
+    caller: AuthedUser,
+    target: string,
+    meta: RequestMeta = {},
+  ): Promise<void> {
+    if (caller.role !== 'admin') throw new AuthError('只有主用户可以删除用户', 'FORBIDDEN', 403);
+    const targetUser = await this.db.getUserByUsername(target.trim());
+    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (targetUser.username === caller.username) {
+      throw new AuthError('不能删除自己', 'CANNOT_REMOVE_SELF', 400);
+    }
+    await this.db.deleteUser(targetUser.id);
+    this.db.clearLoginAttemptsOf(targetUser.username);
+    await this.db.audit('subuser_removed', {
+      username: targetUser.username,
+      ip: meta.ip,
+      userAgent: meta.userAgent,
+      detail: `由主用户 ${caller.username} 删除`,
+    });
   }
 }
