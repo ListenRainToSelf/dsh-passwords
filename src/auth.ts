@@ -12,6 +12,8 @@ const BCRYPT_ROUNDS = 10;
 const TOKEN_TTL = '12h';
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
+/** 时序均衡用空跑哈希：用户不存在时也执行一次 bcrypt，抹平“快=不存在”的枚举差异 */
+const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUNDS);
 
 export class AuthError extends Error {
   constructor(
@@ -137,9 +139,14 @@ export class AuthService {
       throw new AuthError(`账号已锁定，请 ${remainMin} 分钟后再试`, 'ACCOUNT_LOCKED', 429);
     }
 
-    // 2) 凭据校验（统一错误信息，避免用户名枚举）
+    // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
     const user = await this.db.getUserByUsername(username);
-    const valid = user ? await bcrypt.compare(input.password, user.password_hash) : false;
+    let valid = false;
+    if (user) {
+      valid = await bcrypt.compare(input.password, user.password_hash);
+    } else {
+      await bcrypt.compare(input.password, DUMMY_HASH); // 空跑一次，抹平时序差异
+    }
     if (!user || !valid) {
       const count = await this.db.recordLoginFailure(username, ip);
       if (count >= MAX_FAILED) {

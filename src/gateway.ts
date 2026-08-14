@@ -45,15 +45,38 @@ function readCookie(cookieHeader: string | undefined, name: string): string | nu
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
     const [key, ...rest] = part.trim().split('=');
-    if (key === name && rest.length > 0) return decodeURIComponent(rest.join('='));
+    if (key === name && rest.length > 0) {
+      const raw = rest.join('=');
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        // 畸形百分号编码（如 %zz）：返回原值，JWT 校验自然失败，不抛 URIError 500
+        return raw;
+      }
+    }
   }
   return null;
 }
 
-/** 防开放重定向：next 只允许站内路径（以 / 开头且不以 // 开头） */
+/**
+ * 防开放重定向：next 只允许站内路径。
+ * 拒绝一切浏览器可能解析成跨域的形式：
+ *   - 反斜杠（浏览器按 '/' 解析：/\evil.com → //evil.com 协议相对跳转）
+ *   - 解码后以 // 开头（%2F%2F 解码后成 //）
+ *   - 非 / 开头、控制字符/空白
+ */
 function safeNext(next: string | undefined): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/';
-  return next;
+  if (!next) return '/';
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(next);
+  } catch {
+    return '/';
+  }
+  if (decoded.includes('\\')) return '/';
+  if (!decoded.startsWith('/') || decoded.startsWith('//')) return '/';
+  if (/[\u0000-\u0020\u007f]/.test(decoded)) return '/';
+  return decoded;
 }
 
 // ── 主题同步：合理化跟随 dsh 主题 ─────────────────────────────
@@ -453,12 +476,20 @@ export function createGatewayServer(
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
+  // 路径先用 WHATWG URL 规范化（. / .. / %2e%2e 均被归一），再做前缀判断——
+  // 否则 /gateway/../api/xxx 会绕过前缀检查直达上游（dsh 侧 new URL 同样
+  // 会归一化该路径，等于未认证调用任意 RPC）。解析失败一律按未认证处理，绝不 500。
   app.use((req, res, next) => {
-    if (req.path.startsWith('/gateway/')) return next();
-    if (sessionOf(req)) return next();
-    // 重定向兼容层：记录原始 URL，登录后跳回
-    const nextUrl = encodeURIComponent(req.originalUrl);
-    res.redirect(302, `/gateway/login?next=${nextUrl}`);
+    try {
+      const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      if (parsed.pathname.startsWith('/gateway/')) return next();
+      if (sessionOf(req)) return next();
+      // 重定向兼容层：记录原始 URL，登录后跳回
+      const nextUrl = encodeURIComponent(req.originalUrl);
+      res.redirect(302, `/gateway/login?next=${nextUrl}`);
+    } catch {
+      res.redirect(302, '/gateway/login');
+    }
   });
 
   // ── 反向代理（HTTP）→ 上游 dsh ──────────────────────────────
@@ -473,11 +504,13 @@ export function createGatewayServer(
     }
     delete headers['content-length'];
 
+    const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,
         port: upstreamPort,
-        path: req.originalUrl,
+        // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
+        path: parsedUrl.pathname + parsedUrl.search,
         method: req.method,
         headers,
       },
@@ -579,10 +612,10 @@ export function createGatewayServer(
       return;
     }
 
-    // 转发升级请求（Host/Origin 改写，同 HTTP 路径）
+    // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
     const upstreamSocket = net.connect(upstreamPort, upstreamHost, () => {
       const lines: string[] = [
-        `${req.method ?? 'GET'} ${req.url} HTTP/1.1`,
+        `${req.method ?? 'GET'} ${url.pathname + url.search} HTTP/1.1`,
       ];
       for (const [key, value] of Object.entries(req.headers)) {
         if (key.toLowerCase() === 'host') {
@@ -618,7 +651,13 @@ export function createRedirectServer(config: PlatformConfig): http.Server | null
     // Host 头部可能带跳转端口或 :80 后缀，跳转目标去掉它们；空 Host 回退主端口
     const strip = new RegExp(`:(${config.gateway.redirectPort}|80)$`);
     const rawHost = (req.headers.host ?? '').replace(strip, '');
-    const host = rawHost || `127.0.0.1:${config.gateway.port}`;
+    // 防 Host 反射（HTTP/1.0 可伪造 Host: evil.com → Location: https://evil.com/）：
+    // 配置了 MCP_GATEWAY_PUBLIC_HOST 时固定用它；否则严格校验请求 Host 格式
+    const candidate = config.gateway.publicHost || rawHost;
+    const host =
+      /^[A-Za-z0-9.\-[\]:]+$/.test(candidate) && candidate !== ''
+        ? candidate
+        : `127.0.0.1:${config.gateway.port}`;
     const target = `https://${host}${req.url ?? '/'}`;
     res.writeHead(301, {
       Location: target,

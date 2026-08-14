@@ -184,6 +184,7 @@ sudo ufw allow 443/tcp   # 安全组同样要放行 443
 | `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页的地址（保持默认） |
 | `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填就开 HTTPS |
 | `MCP_GATEWAY_REDIRECT_PORT` | 空 | 填 `80` 后 80 端口只做跳转 |
+| `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
 | `MCP_DSH_SETTINGS_FILE` | 自动找 `~/.dsh/settings.yaml` | 网关和 dsh 不在同一台机器时才要填 |
 
 ## 常用命令
@@ -211,6 +212,11 @@ node dist/index.js serve-gateway --port 9000   # 换个端口启动
 - 登录页安全头：严格 CSP、防点击劫持、禁缓存、禁嗅探
 - 数据静态加密：用户名/IP/审计记录密文落盘，旧明文自动迁移并清残留
 - 源码里没有任何秘密（密钥全在 `.env` 和数据库里），源码公开不影响安全
+- 路径穿越防护：`/gateway/../api/xxx` 类请求先规范化再鉴权，未登录一律拦下
+- 用户名枚举防护：用户不存在时也空跑一次 bcrypt，响应时序抹平
+- 开放重定向防护：`next` 参数白名单校验（拒绝 `\`、`%2F%2F`、控制字符）
+- Host 伪造防护：80 跳转目标固定用 `MCP_GATEWAY_PUBLIC_HOST`，不反射请求 Host
+- Cookie 畸形编码容错：不会因一条坏 Cookie 让整个站点 500
 
 ## License
 

@@ -28,6 +28,8 @@ export interface PlatformConfig {
     tls: { cert: string; key: string } | null;
     /** HTTP→HTTPS 301 跳转端口（TLS 开启时可选；空/0 = 关闭） */
     redirectPort: number | null;
+    /** 公网访问主机（跳转固定用它，防 Host 头反射；留空则用校验后的请求 Host） */
+    publicHost: string;
   };
   jwtSecret: string;
 }
@@ -62,6 +64,7 @@ export function loadConfig(): PlatformConfig {
         const n = Number(raw);
         return raw !== '' && Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
       })(),
+      publicHost: readEnv('MCP_GATEWAY_PUBLIC_HOST', ''),
     },
     jwtSecret,
   };
