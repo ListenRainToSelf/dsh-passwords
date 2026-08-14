@@ -8,8 +8,6 @@ dsh 自带的网页界面没有任何登录功能。放上服务器/云主机后
 
 🏅 已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 插件精选列表（Development & Runtime）。
 
-> 名字的由来：这个项目最早叫 dsh-mcp-platform（当时带 MCP 功能），后来 MCP 删了，只剩一个登录网关，就改名 dsh-passwords——好记：dsh 的密码门。
-
 ## 两大核心能力
 
 ### 1️⃣ 远程连接
