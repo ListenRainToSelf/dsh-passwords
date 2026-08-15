@@ -151,19 +151,20 @@ export function apply(ctx: Context): void {
   /** 统一守卫：跨站拒绝 + 配置检查 + 会话校验 */
   const guard = (req: IncomingMessage, res: ServerResponse): AuthedUser | null => {
     if (req.headers['sec-fetch-site'] === 'cross-site') {
-      writeJson(res, 403, { ok: false, error: 'forbidden' });
+      writeJson(res, 403, { ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
       return null;
     }
     if (db === null || auth === null) {
       writeJson(res, 503, {
         ok: false,
+        code: 'NOT_CONFIGURED',
         error: '未配置：请先完成 dsh-passwords 部署（.env 中 SETUP_KEY 等），再重启 dsh',
       });
       return null;
     }
     const caller = callerOf(req);
     if (!caller) {
-      writeJson(res, 401, { ok: false, error: '未登录或会话已失效' });
+      writeJson(res, 401, { ok: false, code: 'NOT_AUTHENTICATED', error: '未登录或会话已失效' });
       return null;
     }
     return caller;
@@ -174,12 +175,17 @@ export function apply(ctx: Context): void {
     userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
   });
 
+  /** 错误响应：携带稳定 code（设置页卡片按 dsh 语言本地化）+ 中文兜底文案 */
   const failJson = (res: ServerResponse, error: unknown): void => {
     if (error instanceof AuthError) {
-      writeJson(res, error.status, { ok: false, error: error.message });
+      writeJson(res, error.status, { ok: false, code: error.code, error: error.message });
       return;
     }
-    writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : '内部错误' });
+    writeJson(res, 500, {
+      ok: false,
+      code: 'INTERNAL',
+      error: error instanceof Error ? error.message : '内部错误',
+    });
   };
 
   // ── /api/dsh-passwords/* 路由（exact 路由先于连接插件的 /api 前缀命中） ──

@@ -3,7 +3,12 @@
 //   - 远程设置补丁：状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
 //   - 用户管理：改密/改名/子用户分配（主用户 admin 可管理所有，子用户只能改自己）
 // 数据面：/api/dsh-passwords/*（网关注入的 JWT cookie 鉴权）。
+//
+// 语言：卡片词典注册在 locale 命名空间 'dshpw'（见 locales.ts），文字跟随
+// dsh 设置里的语言（Settings → General → Language）。t seat 由注册时的
+// `locale: 'dshpw'` 声明注入。
 import { createElement as h, useEffect, useState } from 'react';
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots';
 
 export interface UserInfo {
   id: number;
@@ -27,20 +32,37 @@ export interface PatchState {
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
+type ApiError = { error?: string; code?: string };
+
 function api<T>(path: string, body?: unknown): Promise<T> {
   return fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then(async (res) => {
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    if (!res.ok) throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+    const data = (await res.json().catch(() => ({}))) as ApiError & T;
+    if (!res.ok) {
+      const err = new Error(data.error || `HTTP ${res.status}`);
+      // 携带服务端稳定错误码：errText 优先按码本地化（跟随 dsh 语言）
+      (err as Error & { code?: string }).code = data.code;
+      throw err;
+    }
     return data as T;
   });
 }
 
-function errText(error: unknown): string {
-  return error instanceof Error ? error.message : '操作失败';
+/** 错误文案：有 code 走本地词典，未知 code / 无 code 回退服务端文案 */
+function errText(error: unknown, tr: (key: string, params?: Record<string, string | number>) => string): string {
+  if (error instanceof Error) {
+    const code = (error as Error & { code?: string }).code;
+    if (code) {
+      const key = `err.${code}`;
+      const localized = tr(key);
+      if (localized !== key) return localized;
+    }
+    return error.message;
+  }
+  return tr('opFailed');
 }
 
 function Chevron(props: { open: boolean }) {
@@ -64,7 +86,8 @@ function Chevron(props: { open: boolean }) {
   );
 }
 
-export function DshPasswordsCard(_props: object) {
+export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
+  const t = props.t;
   // 折叠状态（与官方 PluginCard 一致：默认收起，展开状态为卡片本地状态）
   const [open, setOpen] = useState(false);
 
@@ -91,7 +114,7 @@ export function DshPasswordsCard(_props: object) {
         setData(d);
         setError('');
       })
-      .catch((e) => setError(errText(e)));
+      .catch((e) => setError(errText(e, t)));
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
       .then((r) => setPatchState(r.status))
       .catch(() => setPatchState(null));
@@ -113,7 +136,7 @@ export function DshPasswordsCard(_props: object) {
       setNotice(okMessage);
       refresh();
     } catch (e) {
-      setError(errText(e));
+      setError(errText(e, t));
     } finally {
       setBusy(false);
     }
@@ -127,35 +150,35 @@ export function DshPasswordsCard(_props: object) {
       window.setTimeout(() => {
         window.location.reload();
       }, 6000);
-    }, '正在重载：网页服务即将重启，页面将自动刷新');
+    }, t('reloading'));
   };
 
   const changePassword = () => {
-    if (pwNew !== pwConfirm) return setError('两次输入的密码不一致');
-    if (!PASSWORD_RE.test(pwNew)) return setError('密码需至少 12 位，且同时包含大写字母、小写字母、数字、符号');
+    if (pwNew !== pwConfirm) return setError(t('pwMismatch'));
+    if (!PASSWORD_RE.test(pwNew)) return setError(t('pwPolicy'));
     void run(
       () => api('/api/dsh-passwords/password', { target: pwTarget || me, password: pwNew }),
-      '密码已修改（若改的是自己，其他设备上的会话已全部失效）',
+      t('pwChanged'),
     );
   };
 
   const rename = () => {
-    if (!USERNAME_RE.test(nameNew)) return setError('用户名需为 3-32 位字母、数字、下划线或连字符');
+    if (!USERNAME_RE.test(nameNew)) return setError(t('namePolicy'));
     void run(
       () => api('/api/dsh-passwords/username', { target: nameTarget || me, username: nameNew }),
-      '用户名已修改。若改的是自己，请用新用户名重新登录。',
+      t('nameChanged'),
     );
   };
 
   const addSubUser = () => {
-    if (!USERNAME_RE.test(addName)) return setError('用户名需为 3-32 位字母、数字、下划线或连字符');
-    if (!PASSWORD_RE.test(addPw)) return setError('密码需至少 12 位，且同时包含大写字母、小写字母、数字、符号');
-    void run(() => api('/api/dsh-passwords/users', { username: addName, password: addPw }), '子用户已创建');
+    if (!USERNAME_RE.test(addName)) return setError(t('namePolicy'));
+    if (!PASSWORD_RE.test(addPw)) return setError(t('pwPolicy'));
+    void run(() => api('/api/dsh-passwords/users', { username: addName, password: addPw }), t('subCreated'));
   };
 
   const removeUser = (username: string) => {
-    if (!window.confirm(`确定删除子用户 ${username} 吗？该操作不可撤销。`)) return;
-    void run(() => api('/api/dsh-passwords/users/remove', { target: username }), '子用户已删除');
+    if (!window.confirm(t('delConfirm', { username }))) return;
+    void run(() => api('/api/dsh-passwords/users/remove', { target: username }), t('deleted'));
   };
 
   // 管理员的目标用户下拉：列出全部用户（默认自己，即当前账号在列表中的那一项）
@@ -172,7 +195,7 @@ export function DshPasswordsCard(_props: object) {
             h(
               'option',
               { key: u.id, value: u.username },
-              `${u.username}（${u.role === 'admin' ? '主用户' : '子用户'}）`,
+              `${u.username}（${u.role === 'admin' ? t('owner') : t('subuser')}）`,
             ),
           ),
         )
@@ -180,7 +203,7 @@ export function DshPasswordsCard(_props: object) {
 
   const patchOk = patchState !== null && patchState.settingsHostMode && patchState.whitelist;
   const patchText =
-    patchState === null ? '状态未知' : patchOk ? '已启用 · 远程连接可用' : '异常：部分功能不可用';
+    patchState === null ? t('patchUnknown') : patchOk ? t('patchOk') : t('patchBad');
 
   const header = h(
     'button',
@@ -188,21 +211,21 @@ export function DshPasswordsCard(_props: object) {
       type: 'button',
       className: 'dshpw-header',
       'aria-expanded': open,
-      'aria-label': (open ? '收起' : '展开') + '：dsh-passwords · 密码门',
+      'aria-label': `${open ? t('collapse') : t('expand')}: dsh-passwords`,
       onClick: () => setOpen(!open),
     },
     h(
       'span',
       { className: 'dshpw-head' },
-      h('span', { className: 'dshpw-title' }, 'dsh-passwords · 密码门'),
+      h('span', { className: 'dshpw-title' }, t('title')),
       h(
         'span',
         { className: 'dshpw-desc' },
-        '登录网关的账号管理。当前身份：',
+        t('desc'),
         h('strong', null, me || '—'),
         isAdmin
-          ? h('span', { className: 'dshpw-badge admin' }, '主用户')
-          : h('span', { className: 'dshpw-badge' }, '子用户'),
+          ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+          : h('span', { className: 'dshpw-badge' }, t('subuser')),
       ),
     ),
     h(Chevron, { open }),
@@ -215,46 +238,41 @@ export function DshPasswordsCard(_props: object) {
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, '远程设置'),
+      h('span', { className: 'dshpw-label' }, t('patch')),
       h(
         'div',
         { className: 'dshpw-row' },
         h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
-        h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, '重载补丁'),
+        h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
       ),
-      h(
-        'div',
-        { className: 'dshpw-hint' },
-        '经密码门登录后，远程浏览器可正常使用 dsh 的全部设置功能。',
-        'dsh 升级后若设置页出现异常，点"重载补丁"即可修复（自动重启网页服务并刷新页面）。',
-      ),
+      h('div', { className: 'dshpw-hint' }, t('patchHint1'), ' ', t('patchHint2')),
     ),
 
     // ── 修改密码 ──
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, '修改密码'),
-      isAdmin && h('span', { className: 'dshpw-hint' }, '目标用户'),
+      h('span', { className: 'dshpw-label' }, t('chgPw')),
+      isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
       targetSelect(pwTarget, setPwTarget),
       h('input', {
         className: 'dshpw-input',
         type: 'password',
-        placeholder: '新密码（至少 12 位，含大小写、数字、符号）',
+        placeholder: t('newPwPh'),
         value: pwNew,
         onChange: (e: { target: { value: string } }) => setPwNew(e.target.value),
       }),
       h('input', {
         className: 'dshpw-input',
         type: 'password',
-        placeholder: '再次输入新密码',
+        placeholder: t('confirmPwPh'),
         value: pwConfirm,
         onChange: (e: { target: { value: string } }) => setPwConfirm(e.target.value),
       }),
       h(
         'div',
         { className: 'dshpw-row' },
-        h('button', { className: 'dshpw-btn', disabled: busy, onClick: changePassword }, '保存密码'),
+        h('button', { className: 'dshpw-btn', disabled: busy, onClick: changePassword }, t('savePw')),
       ),
     ),
 
@@ -262,21 +280,21 @@ export function DshPasswordsCard(_props: object) {
     h(
       'div',
       { className: 'dshpw-section' },
-      h('span', { className: 'dshpw-label' }, '修改用户名'),
-      isAdmin && h('span', { className: 'dshpw-hint' }, '目标用户'),
+      h('span', { className: 'dshpw-label' }, t('chgName')),
+      isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
       targetSelect(nameTarget, setNameTarget),
       h('input', {
         className: 'dshpw-input',
-        placeholder: '新用户名（3-32 位字母、数字、下划线或连字符）',
+        placeholder: t('newNamePh'),
         value: nameNew,
         onChange: (e: { target: { value: string } }) => setNameNew(e.target.value),
       }),
       h(
         'div',
         { className: 'dshpw-row' },
-        h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, '保存用户名'),
+        h('button', { className: 'dshpw-btn', disabled: busy, onClick: rename }, t('saveName')),
       ),
-      h('div', { className: 'dshpw-hint' }, '改名后旧会话立即失效，需要用新用户名重新登录。'),
+      h('div', { className: 'dshpw-hint' }, t('nameHint')),
     ),
 
     // ── 子用户管理（仅主用户） ──
@@ -284,7 +302,7 @@ export function DshPasswordsCard(_props: object) {
       h(
         'div',
         { className: 'dshpw-section' },
-        h('span', { className: 'dshpw-label' }, '子用户管理'),
+        h('span', { className: 'dshpw-label' }, t('subusers')),
         ...(data?.users ?? []).map((u) =>
           h(
             'div',
@@ -294,33 +312,33 @@ export function DshPasswordsCard(_props: object) {
               null,
               u.username,
               u.role === 'admin'
-                ? h('span', { className: 'dshpw-badge admin' }, '主用户')
-                : h('span', { className: 'dshpw-badge' }, '子用户'),
-              u.last_login_at ? h('span', { className: 'dshpw-hint' }, ` 最近登录 ${u.last_login_at}`) : null,
+                ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
+                : h('span', { className: 'dshpw-badge' }, t('subuser')),
+              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: u.last_login_at })) : null,
             ),
             u.username !== me &&
-              h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, '删除'),
+              h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, t('remove')),
           ),
         ),
         h('input', {
           className: 'dshpw-input',
-          placeholder: '子用户名（3-32 位字母、数字、下划线或连字符）',
+          placeholder: t('subNamePh'),
           value: addName,
           onChange: (e: { target: { value: string } }) => setAddName(e.target.value),
         }),
         h('input', {
           className: 'dshpw-input',
           type: 'password',
-          placeholder: '子用户密码（至少 12 位，含大小写、数字、符号）',
+          placeholder: t('subPwPh'),
           value: addPw,
           onChange: (e: { target: { value: string } }) => setAddPw(e.target.value),
         }),
         h(
           'div',
           { className: 'dshpw-row' },
-          h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, '添加子用户'),
+          h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
         ),
-        h('div', { className: 'dshpw-hint' }, '子用户可用同样的登录页进入 dsh，但没有用户管理权限。'),
+        h('div', { className: 'dshpw-hint' }, t('subHint')),
       ),
 
     error && h('div', { className: 'dshpw-error' }, error),

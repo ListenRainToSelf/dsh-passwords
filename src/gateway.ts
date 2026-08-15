@@ -17,8 +17,20 @@ import type { PlatformConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database } from './db.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
+import { t, resolveGatewayLang, type Lang } from './i18n.js';
 
 const COOKIE_NAME = 'dsh_gateway_token';
+/** 语言偏好 cookie（用户在登录页手动切换后持久化） */
+const LANG_COOKIE = 'dshpw_lang';
+
+/** 解析页面语言：?lang → cookie → dsh 设置(locale.preference) → 浏览器语言 → zh */
+function langOf(req: Request): Lang {
+  return resolveGatewayLang({
+    queryLang: req.query.lang,
+    cookieLang: readCookie(req.headers.cookie, LANG_COOKIE),
+    acceptLanguage: req.headers['accept-language'],
+  });
+}
 
 /**
  * 注入 dsh HTML 的兼容脚本：
@@ -248,13 +260,25 @@ button:disabled{opacity:.7;cursor:default}
 .rules span.on{color:var(--ok)}
 .strength{height:4px;margin-top:10px;border-radius:999px;background:var(--field);border:1px solid var(--border-soft);overflow:hidden}
 .strength i{display:block;height:100%;width:0;border-radius:999px;background:var(--danger);transition:width .32s cubic-bezier(.22,1,.36,1),background .32s}
+.lang-switch{position:absolute;top:14px;right:16px;display:flex;gap:12px;font-size:12px}
+.lang-switch a{color:var(--caption);text-decoration:none;transition:color .15s}
+.lang-switch a:hover{color:var(--sub)}
+.lang-switch a.on{color:var(--brand);font-weight:600}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 `;
 
+/** 语言切换链接：中文 / English（当前语言高亮，点击带 ?lang= 走同一个登录路径） */
+function langSwitch(lang: Lang, next: string): string {
+  const query = next === '' ? '' : `?next=${encodeURIComponent(next)}`;
+  const mk = (id: Lang, label: string) =>
+    `<a${lang === id ? ' class="on"' : ''} href="/gateway/login${query}${query === '' ? '?' : '&'}lang=${id}">${label}</a>`;
+  return `<div class="lang-switch">${mk('zh', '中文')}${mk('en', 'English')}</div>`;
+}
+
 /** 页面骨架：共享 head（主题引导 + 样式）+ 背景动画层 + 卡片容器 */
-function pageShell(params: { title: string; body: string; script?: string }): string {
+function pageShell(params: { lang: Lang; title: string; body: string; script?: string }): string {
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="${params.lang === 'en' ? 'en' : 'zh-CN'}">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -271,37 +295,40 @@ ${params.script ?? ''}
 </html>`;
 }
 
-function renderLoginPage(params: { next: string; error?: string; dbHealthy: boolean; csrf: string }): string {
+function renderLoginPage(params: { lang: Lang; next: string; error?: string; dbHealthy: boolean; csrf: string }): string {
+  const tr = (key: string, tp?: Record<string, string | number>) => t(params.lang, key, tp);
   const errorBlock = params.error
     ? `<div class="error-bar" id="error-bar">${escapeHtml(params.error)}</div>`
     : '';
   const dbHint = params.dbHealthy
     ? ''
-    : '<div class="db-hint">注意：数据库当前不可达，登录校验将不可用</div>';
+    : `<div class="db-hint">${escapeHtml(tr('gw.dbHint'))}</div>`;
   const body = `
   <div class="logo">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" stroke="white" stroke-width="1.6"/><path d="M8.5 12l2.5 2.5 4.5-5" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </div>
-  <h1>登录 DeepSeek Harness</h1>
-  <p class="sub">访问已受 dsh-passwords 网关保护<br/>请输入平台账号密码</p>
+  ${langSwitch(params.lang, params.next)}
+  <h1>${tr('gw.loginTitle')}</h1>
+  <p class="sub">${tr('gw.loginSub1')}<br/>${tr('gw.loginSub2')}</p>
   <form method="POST" action="/gateway/login" id="login-form">
     <input type="hidden" name="csrf" value="${escapeHtml(params.csrf)}" />
     <input type="hidden" name="next" value="${escapeHtml(params.next)}" />
-    <label><span>用户名</span><input type="text" name="username" placeholder="你的用户名" autocomplete="username" required /></label>
-    <label><span>密码</span><input type="password" name="password" placeholder="你的密码" autocomplete="current-password" required /></label>
-    <button type="submit" id="submit-btn">登录</button>
+    <label><span>${tr('gw.username')}</span><input type="text" name="username" placeholder="${tr('gw.usernamePlaceholder')}" autocomplete="username" required /></label>
+    <label><span>${tr('gw.password')}</span><input type="password" name="password" placeholder="${tr('gw.passwordPlaceholder')}" autocomplete="current-password" required /></label>
+    <button type="submit" id="submit-btn">${tr('gw.login')}</button>
   </form>
   ${errorBlock}
   ${dbHint}`;
   return pageShell({
-    title: '登录 · DeepSeek Harness',
+    lang: params.lang,
+    title: tr('gw.titleLogin'),
     body,
     script: `<script>
   const err = document.getElementById('error-bar');
   if (err) { setTimeout(() => { err.style.display = 'block'; }, 50); }
   document.getElementById('login-form').addEventListener('submit', () => {
     const btn = document.getElementById('submit-btn');
-    btn.textContent = '登录中…';
+    btn.textContent = ${JSON.stringify(tr('gw.loggingIn'))};
     btn.disabled = true;
   });
 </script>`,
@@ -318,33 +345,36 @@ function escapeHtml(value: string): string {
 }
 
 // ── 首次配置页（平台未初始化时显示；预设密钥 + 用户名 + 密码） ──
-function renderSetupPage(params: { error?: string; csrf: string }): string {
+function renderSetupPage(params: { lang: Lang; error?: string; csrf: string }): string {
+  const tr = (key: string, tp?: Record<string, string | number>) => t(params.lang, key, tp);
   const errorBlock = params.error
     ? `<div class="error-bar" id="error-bar">${escapeHtml(params.error)}</div>`
     : '';
   const body = `
   <div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" stroke="white" stroke-width="1.6"/><path d="M8.5 12l2.5 2.5 4.5-5" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-  <h1>首次配置</h1>
-  <p class="sub">输入部署时预设的安装密钥，并创建管理员账号<br/>此操作只能进行一次</p>
+  ${langSwitch(params.lang, '')}
+  <h1>${tr('gw.setupTitle')}</h1>
+  <p class="sub">${tr('gw.setupSub1')}<br/>${tr('gw.setupSub2')}</p>
   <form method="POST" action="/gateway/setup" id="setup-form">
     <input type="hidden" name="csrf" value="${escapeHtml(params.csrf)}" />
-    <label><span>预设密钥</span><input type="password" name="setupKey" placeholder="部署时在 .env 中设置的 SETUP_KEY" required /></label>
-    <label><span>用户名</span><input type="text" name="username" placeholder="3-32 位字母数字下划线" autocomplete="username" required /></label>
-    <label><span>密码</span><input type="password" name="password" id="pw" placeholder="至少 12 位，含大写、小写、数字、符号" autocomplete="new-password" required /></label>
+    <label><span>${tr('gw.setupKey')}</span><input type="password" name="setupKey" placeholder="${tr('gw.setupKeyPlaceholder')}" required /></label>
+    <label><span>${tr('gw.username')}</span><input type="text" name="username" placeholder="${tr('gw.usernameRule')}" autocomplete="username" required /></label>
+    <label><span>${tr('gw.password')}</span><input type="password" name="password" id="pw" placeholder="${tr('gw.passwordRule')}" autocomplete="new-password" required /></label>
     <div class="strength"><i id="pw-bar"></i></div>
     <div class="rules" id="pw-rules">
-      <span data-r="len">○ 至少 12 位</span>
-      <span data-r="up">○ 含大写字母</span>
-      <span data-r="low">○ 含小写字母</span>
-      <span data-r="num">○ 含数字</span>
-      <span data-r="sym">○ 含符号</span>
+      <span data-r="len">○ ${tr('gw.ruleLen')}</span>
+      <span data-r="up">○ ${tr('gw.ruleUp')}</span>
+      <span data-r="low">○ ${tr('gw.ruleLow')}</span>
+      <span data-r="num">○ ${tr('gw.ruleNum')}</span>
+      <span data-r="sym">○ ${tr('gw.ruleSym')}</span>
     </div>
-    <label><span>确认密码</span><input type="password" name="confirm" placeholder="再次输入密码" autocomplete="new-password" required /></label>
-    <button type="submit" id="submit-btn">初始化平台</button>
+    <label><span>${tr('gw.confirmPassword')}</span><input type="password" name="confirm" placeholder="${tr('gw.confirmPlaceholder')}" autocomplete="new-password" required /></label>
+    <button type="submit" id="submit-btn">${tr('gw.initPlatform')}</button>
   </form>
   ${errorBlock}`;
   return pageShell({
-    title: '首次配置 · DeepSeek Harness',
+    lang: params.lang,
+    title: tr('gw.titleSetup'),
     body,
     script: `<script>
   const err = document.getElementById('error-bar');
@@ -375,7 +405,7 @@ function renderSetupPage(params: { error?: string; csrf: string }): string {
     if (pwv !== confirm) {
       e.preventDefault();
       const err = document.getElementById('error-bar');
-      err.textContent = '两次输入的密码不一致';
+      err.textContent = ${JSON.stringify(tr('gw.passwordMismatch'))};
       err.style.display = 'block';
       err.style.animation = 'none';
       void err.offsetWidth;
@@ -383,7 +413,7 @@ function renderSetupPage(params: { error?: string; csrf: string }): string {
       return;
     }
     const btn = document.getElementById('submit-btn');
-    btn.textContent = '正在初始化…';
+    btn.textContent = ${JSON.stringify(tr('gw.initializing'))};
     btn.disabled = true;
   });
 </script>`,
@@ -472,6 +502,8 @@ export function createGatewayServer(
   // ── 登录页（GET）：平台未初始化时显示首次配置页 ─────────────
   app.get('/gateway/login', async (req, res) => {
     const next = safeNext(typeof req.query.next === 'string' ? req.query.next : undefined);
+    const lang = langOf(req);
+    const queryLang = typeof req.query.lang === 'string' ? req.query.lang : null;
     const [initialized, dbHealthy] = await Promise.all([
       auth.isInitialized().catch(() => false),
       db.health().catch(() => false),
@@ -479,11 +511,25 @@ export function createGatewayServer(
     // 每次渲染下发新 CSRF token（Cookie + 表单隐藏域）
     const csrf = newCsrfToken();
     setCsrfCookie(res, csrf, config.gateway.tls !== null);
+    // 显式 ?lang= 选择持久化到 cookie（语言切换链接点出来的）。
+    // 注意 Set-Cookie 头已由 CSRF 占用，这里用数组追加而不是 setHeader 覆盖。
+    if (queryLang === 'zh' || queryLang === 'en') {
+      const langCookie = `${LANG_COOKIE}=${queryLang}; Path=/gateway; SameSite=Lax; Max-Age=31536000${
+        config.gateway.tls !== null ? '; Secure' : ''
+      }`;
+      const existing = res.getHeader('Set-Cookie');
+      const prev: string[] = Array.isArray(existing)
+        ? existing.map((value) => String(value))
+        : existing
+          ? [String(existing)]
+          : [];
+      res.setHeader('Set-Cookie', [...prev, langCookie]);
+    }
     if (!initialized) {
-      res.type('html').send(renderSetupPage({ csrf }));
+      res.type('html').send(renderSetupPage({ lang, csrf }));
       return;
     }
-    res.type('html').send(renderLoginPage({ next, dbHealthy, csrf }));
+    res.type('html').send(renderLoginPage({ lang, next, dbHealthy, csrf }));
   });
 
   // ── 首次配置提交（POST）→ 302 回登录页 ────────────────────────
@@ -501,7 +547,7 @@ export function createGatewayServer(
       res
         .status(403)
         .type('html')
-        .send(renderSetupPage({ error: '页面安全校验失败，请重新提交', csrf }));
+        .send(renderSetupPage({ lang: langOf(req), error: t(langOf(req), 'gw.csrfFailed'), csrf }));
       return;
     }
 
@@ -511,10 +557,16 @@ export function createGatewayServer(
     } catch (error) {
       // 真实状态码：409 已初始化 / 401 密钥错误 / 400 参数错误
       const status = error instanceof AuthError ? error.status : 400;
-      const message = error instanceof Error ? error.message : '初始化失败';
+      const lang = langOf(req);
+      const message =
+        error instanceof AuthError
+          ? error.localize(lang)
+          : error instanceof Error
+            ? error.message
+            : t(lang, 'gw.initFailed');
       const csrf = newCsrfToken();
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
-      res.status(status).type('html').send(renderSetupPage({ error: message, csrf }));
+      res.status(status).type('html').send(renderSetupPage({ lang, error: message, csrf }));
     }
   });
 
@@ -534,7 +586,9 @@ export function createGatewayServer(
       res
         .status(403)
         .type('html')
-        .send(renderLoginPage({ next, error: '页面安全校验失败，请重新提交', dbHealthy, csrf }));
+        .send(
+          renderLoginPage({ lang: langOf(req), next, error: t(langOf(req), 'gw.csrfFailed'), dbHealthy, csrf }),
+        );
       return;
     }
 
@@ -550,11 +604,17 @@ export function createGatewayServer(
     } catch (error) {
       // 真实状态码：429 锁定 / 401 凭据错误 / 400 其他
       const status = error instanceof AuthError ? error.status : 400;
-      const message = error instanceof Error ? error.message : '登录失败';
+      const lang = langOf(req);
+      const message =
+        error instanceof AuthError
+          ? error.localize(lang)
+          : error instanceof Error
+            ? error.message
+            : t(lang, 'gw.loginFailed');
       const dbHealthy = await db.health().catch(() => false);
       const csrf = newCsrfToken();
       setCsrfCookie(res, csrf, config.gateway.tls !== null);
-      res.status(status).type('html').send(renderLoginPage({ next, error: message, dbHealthy, csrf }));
+      res.status(status).type('html').send(renderLoginPage({ lang, next, error: message, dbHealthy, csrf }));
     }
   });
 
@@ -696,7 +756,10 @@ export function createGatewayServer(
         res.destroy();
         return;
       }
-      res.status(502).type('html').send(`<h3>上游 dsh 不可达</h3><p>${escapeHtml(error.message)}</p>`);
+      res
+        .status(502)
+        .type('html')
+        .send(`<h3>${escapeHtml(t(langOf(req), 'gw.upstreamDown'))}</h3><p>${escapeHtml(error.message)}</p>`);
     });
     // 客户端中途断开：中止上游请求，避免悬挂连接
     res.on('close', () => {

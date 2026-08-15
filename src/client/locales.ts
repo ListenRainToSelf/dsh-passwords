@@ -1,0 +1,148 @@
+// dsh-passwords 设置卡片的双语词典（locale 命名空间 'dshpw'）。
+// 注册进 dsh 的 locale 服务后，卡片文字跟随 dsh 设置里的语言
+// （设置 → 通用 → 语言 / Settings → General → Language），切换即生效。
+//
+// err.* 键与服务端 AuthError.code 一一对应：卡片收到 { code, error } 时
+// 优先按 code 本地化，未知 code 回退到服务端返回的 error 文案。
+
+export const zh = {
+  title: 'dsh-passwords · 密码门',
+  desc: '登录网关的账号管理。当前身份：',
+  owner: '主用户',
+  subuser: '子用户',
+  expand: '展开',
+  collapse: '收起',
+  // 远程设置 / 补丁
+  patch: '远程设置',
+  patchUnknown: '状态未知',
+  patchOk: '已启用 · 远程连接可用',
+  patchBad: '异常：部分功能不可用',
+  reloadPatch: '重载补丁',
+  patchHint1: '经密码门登录后，远程浏览器可正常使用 dsh 的全部设置功能。',
+  patchHint2: 'dsh 升级后若设置页出现异常，点“重载补丁”即可修复（自动重启网页服务并刷新页面）。',
+  reloading: '正在重载：网页服务即将重启，页面将自动刷新',
+  // 修改密码
+  chgPw: '修改密码',
+  targetUser: '目标用户',
+  newPwPh: '新密码（至少 12 位，含大小写、数字、符号）',
+  confirmPwPh: '再次输入新密码',
+  savePw: '保存密码',
+  pwChanged: '密码已修改（若改的是自己，其他设备上的会话已全部失效）',
+  pwMismatch: '两次输入的密码不一致',
+  pwPolicy: '密码需至少 12 位，且同时包含大写字母、小写字母、数字、符号',
+  // 修改用户名
+  chgName: '修改用户名',
+  newNamePh: '新用户名（3-32 位字母、数字、下划线或连字符）',
+  saveName: '保存用户名',
+  nameChanged: '用户名已修改。若改的是自己，请用新用户名重新登录。',
+  namePolicy: '用户名需为 3-32 位字母、数字、下划线或连字符',
+  nameHint: '改名后旧会话立即失效，需要用新用户名重新登录。',
+  // 子用户管理
+  subusers: '子用户管理',
+  remove: '删除',
+  delConfirm: '确定删除子用户 {username} 吗？该操作不可撤销。',
+  deleted: '子用户已删除',
+  lastLogin: ' 最近登录 {time}',
+  subNamePh: '子用户名（3-32 位字母、数字、下划线或连字符）',
+  subPwPh: '子用户密码（至少 12 位，含大小写、数字、符号）',
+  addSub: '添加子用户',
+  subCreated: '子用户已创建',
+  subHint: '子用户可用同样的登录页进入 dsh，但没有用户管理权限。',
+  // 通用
+  opFailed: '操作失败',
+  httpFailed: '请求失败 (HTTP {status})',
+  // 服务端错误码（与 i18n.ts 的 err.* 保持一致）
+  'err.ALREADY_INITIALIZED': '平台已初始化，不能重复配置',
+  'err.INVALID_SETUP_KEY': '预设密钥不正确',
+  'err.INVALID_USERNAME': '用户名需为 3-32 位字母、数字、下划线或连字符',
+  'err.INVALID_PASSWORD': '密码需至少 12 位，且必须同时包含大写字母、小写字母、数字、符号各至少一位',
+  'err.SQL_INJECTION_REJECTED': '{field} 包含非法字符，已拒绝',
+  'err.ACCOUNT_LOCKED': '账号已锁定，请 {minutes} 分钟后再试',
+  'err.ACCOUNT_LOCKED_FRESH': '连续失败 {count} 次，账号已锁定 {minutes} 分钟',
+  'err.INVALID_CREDENTIALS': '用户名或密码错误',
+  'err.INVALID_TOKEN': '会话无效或已过期',
+  'err.NO_SUCH_USER': '目标用户不存在',
+  'err.FORBIDDEN_PASSWORD': '只有主用户可以修改他人密码',
+  'err.FORBIDDEN_USERNAME': '只有主用户可以修改他人用户名',
+  'err.FORBIDDEN_ADD_USER': '只有主用户可以分配子用户',
+  'err.FORBIDDEN_REMOVE_USER': '只有主用户可以删除用户',
+  'err.USERNAME_TAKEN': '该用户名已被使用',
+  'err.CANNOT_REMOVE_SELF': '不能删除自己',
+  'err.NOT_CONFIGURED': '未配置：请先完成 dsh-passwords 部署（.env 中 SETUP_KEY 等），再重启 dsh',
+  'err.NOT_AUTHENTICATED': '未登录或会话已失效',
+  'err.FORBIDDEN_CSRF': '请求被拒绝（跨站伪造防护）',
+  'err.INTERNAL': '内部错误',
+};
+
+export const en: Record<keyof typeof zh, string> = {
+  title: 'dsh-passwords · Password Gate',
+  desc: 'Accounts for the login gateway. Signed in as:',
+  owner: 'Owner',
+  subuser: 'Subuser',
+  expand: 'Expand',
+  collapse: 'Collapse',
+  patch: 'Remote settings',
+  patchUnknown: 'Status unknown',
+  patchOk: 'Enabled · Remote access ready',
+  patchBad: 'Degraded: some features unavailable',
+  reloadPatch: 'Reload patch',
+  patchHint1: 'After signing in through the password gate, remote browsers can use all dsh settings normally.',
+  patchHint2: 'If the settings page breaks after a dsh upgrade, click "Reload patch" to fix it (restarts the web service and refreshes the page).',
+  reloading: 'Reloading: the web service will restart and the page will refresh automatically',
+  chgPw: 'Change password',
+  targetUser: 'Target user',
+  newPwPh: 'New password (12+ chars with uppercase, lowercase, digits and symbols)',
+  confirmPwPh: 'Confirm new password',
+  savePw: 'Save password',
+  pwChanged: 'Password changed (if it was your own, sessions on other devices are invalidated)',
+  pwMismatch: 'The two passwords do not match',
+  pwPolicy: 'Password needs 12+ characters including uppercase, lowercase, digits and symbols',
+  chgName: 'Change username',
+  newNamePh: 'New username (3-32 letters, digits, underscores or hyphens)',
+  saveName: 'Save username',
+  nameChanged: 'Username changed. If it was your own, sign in again with the new username.',
+  namePolicy: 'Username must be 3-32 letters, digits, underscores or hyphens',
+  nameHint: 'After renaming, the old session is invalidated; sign in again with the new username.',
+  subusers: 'Subusers',
+  remove: 'Delete',
+  delConfirm: 'Delete subuser {username}? This cannot be undone.',
+  deleted: 'Subuser deleted',
+  lastLogin: ' Last login {time}',
+  subNamePh: 'Subuser name (3-32 letters, digits, underscores or hyphens)',
+  subPwPh: 'Subuser password (12+ chars with uppercase, lowercase, digits and symbols)',
+  addSub: 'Add subuser',
+  subCreated: 'Subuser created',
+  subHint: 'Subusers sign in through the same page but have no user-management permission.',
+  opFailed: 'Operation failed',
+  httpFailed: 'Request failed (HTTP {status})',
+  'err.ALREADY_INITIALIZED': 'The platform is already initialized and cannot be set up again',
+  'err.INVALID_SETUP_KEY': 'Incorrect setup key',
+  'err.INVALID_USERNAME': 'Username must be 3-32 letters, digits, underscores or hyphens',
+  'err.INVALID_PASSWORD': 'Password must be at least 12 characters and include uppercase, lowercase, digits and symbols',
+  'err.SQL_INJECTION_REJECTED': '{field} contains invalid characters and was rejected',
+  'err.ACCOUNT_LOCKED': 'Account locked, try again in {minutes} minutes',
+  'err.ACCOUNT_LOCKED_FRESH': '{count} consecutive failures, account locked for {minutes} minutes',
+  'err.INVALID_CREDENTIALS': 'Incorrect username or password',
+  'err.INVALID_TOKEN': 'Session is invalid or expired',
+  'err.NO_SUCH_USER': 'Target user does not exist',
+  'err.FORBIDDEN_PASSWORD': "Only the owner can change another user's password",
+  'err.FORBIDDEN_USERNAME': "Only the owner can change another user's username",
+  'err.FORBIDDEN_ADD_USER': 'Only the owner can create subusers',
+  'err.FORBIDDEN_REMOVE_USER': 'Only the owner can delete users',
+  'err.USERNAME_TAKEN': 'That username is already taken',
+  'err.CANNOT_REMOVE_SELF': 'You cannot delete yourself',
+  'err.NOT_CONFIGURED': 'Not configured: finish the dsh-passwords deployment first (SETUP_KEY etc. in .env), then restart dsh',
+  'err.NOT_AUTHENTICATED': 'Not signed in or the session has expired',
+  'err.FORBIDDEN_CSRF': 'Request rejected (cross-site forgery protection)',
+  'err.INTERNAL': 'Internal error',
+};
+
+export type DshpwKey = keyof typeof zh;
+
+// 类型合并：让 locale 服务的 register/bind 与卡片的 t seat 对本命名空间强类型。
+// （客户端代码由 esbuild 构建，类型导入会在产物中擦除，不影响运行时。）
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    dshpw: DshpwKey;
+  }
+}

@@ -7,6 +7,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
+import { zh, en } from './locales';
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
 const CSS = `
@@ -63,6 +64,7 @@ export function apply(ctx: ClientContext): void {
     ),
   );
 
-  // 极简词典：卡片文字基本内嵌中文，locale 仅提供注册契约所需的表项
-  ctx.effect(() => ctx.locale.register('dshpw', { zh: {}, en: {} }), 'dsh-passwords: dicts');
+  // 双语词典（zh/en）：卡片文字跟随 dsh 设置里的语言
+  // （设置 → 通用 → 语言 / Settings → General → Language），切换即时生效
+  ctx.effect(() => ctx.locale.register('dshpw', { zh, en }), 'dsh-passwords: dicts');
 }

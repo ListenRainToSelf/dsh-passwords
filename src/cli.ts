@@ -22,6 +22,11 @@ import {
   restartDshWeb,
   patchStatus,
 } from './patch.js';
+import { t, resolveCliLang } from './i18n.js';
+
+/** CLI 输出语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头则英文，否则中文 */
+const lang = resolveCliLang();
+const tr = (key: string, params?: Record<string, string | number>) => t(lang, key, params);
 
 interface CliOverrides {
   port?: number;
@@ -35,7 +40,7 @@ function parseCliOverrides(argv: string[]): CliOverrides {
   const take = (index: number, name: string): string | null => {
     const next = argv[index + 1];
     if (next === undefined || next.startsWith('--')) {
-      console.error(`[dsh-passwords] 警告: ${name} 缺少值`);
+      console.error(`[dsh-passwords] ${tr('cli.warnMissingValue', { name })}`);
       return null;
     }
     return next;
@@ -48,7 +53,7 @@ function parseCliOverrides(argv: string[]): CliOverrides {
       if (arg === '--port') {
         const port = Number(value);
         if (!Number.isInteger(port) || port < 0 || port > 65535) {
-          console.error(`[dsh-passwords] 警告: 无效端口 ${value}，已忽略`);
+          console.error(`[dsh-passwords] ${tr('cli.warnInvalidPort', { value })}`);
         } else {
           out.port = port;
         }
@@ -79,7 +84,7 @@ function runAudit(argv: string[]): void {
   db.init();
   const rows = db.listAuditLogs(Number.isFinite(limit) ? limit : 30);
   if (rows.length === 0) {
-    console.log('（暂无审计日志）');
+    console.log(tr('cli.noAudit'));
     return;
   }
   for (const row of rows) {
@@ -97,38 +102,42 @@ function runPatch(argv: string[]): void {
   const config = loadConfig();
   const root = findDshRoot(config.patch.dshRoot);
   if (!root) {
-    console.error('[dsh-passwords] 找不到 dsh 安装目录（可用 MCP_DSH_ROOT 指定 @deepseek-ai/dsh 路径）');
+    console.error(`[dsh-passwords] ${tr('cli.noDshRoot')}`);
     process.exit(1);
   }
-  console.log(`dsh 目录: ${root}`);
+  console.log(`${tr('cli.dshDir')}: ${root}`);
   if (action === 'status') {
     const status = patchStatus(root);
-    console.log(`  settings 强制 host 模式: ${status.settingsHostMode ? '已打' : '未打'}`);
-    console.log(`  WEB_SETTINGS_NAMESPACES 白名单(含 dsh-passwords): ${status.whitelist ? '已打' : '未打'}`);
+    console.log(
+      `  ${tr('cli.hostMode')}: ${status.settingsHostMode ? tr('cli.patched') : tr('cli.notPatched')}`,
+    );
+    console.log(
+      `  ${tr('cli.whitelist')}: ${status.whitelist ? tr('cli.patched') : tr('cli.notPatched')}`,
+    );
     return;
   }
   if (action === undefined || action === 'on' || action === 'reload') {
     const result = applyRemotePatch(root);
-    console.log(`  结果: ${result}`);
+    console.log(`  ${tr('cli.result')}: ${result}`);
     if (result === 'applied' && config.patch.restartService) {
-      console.log(`  重启 ${config.patch.restartService} 使补丁立即生效...`);
+      console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
       // CLI 进程跑完就退出，不能用延迟定时器（unref 定时器会被丢弃）；直接同步重启
       try {
         execSync(`systemctl restart ${config.patch.restartService}`, { stdio: 'inherit' });
       } catch (error) {
-        console.error(`  重启失败（补丁将在下次 dsh 重启后生效）: ${String(error)}`);
+        console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
       }
     }
     return;
   }
-  console.error('用法: node dist/cli.js patch [status]');
+  console.error(tr('cli.usage'));
   process.exit(1);
 }
 
 async function boot() {
   const config = loadConfig();
   if (!config.setupKey || config.setupKey === 'change-me-to-a-strong-random-key') {
-    console.error('[dsh-passwords] 请先配置 .env 中的 SETUP_KEY（预设安装密钥），见 .env.example');
+    console.error(`[dsh-passwords] ${tr('cli.needSetupKey')}`);
     process.exit(1);
   }
 
@@ -146,16 +155,16 @@ async function boot() {
     if (root) {
       const result = applyRemotePatch(root);
       if (result === 'applied') {
-        console.error('[dsh-passwords] 远程设置补丁: 已自动应用，dsh 网页服务即将重启');
+        console.error(`[dsh-passwords] ${tr('cli.patchApplied')}`);
         if (config.patch.restartService) restartDshWeb(config.patch.restartService, 2500);
       } else if (result === 'missing') {
-        console.error('[dsh-passwords] 未找到补丁目标文件（dsh 版本可能变更），跳过补丁应用');
+        console.error(`[dsh-passwords] ${tr('cli.patchTargetMissing')}`);
       }
     } else if (config.patch.dshRoot) {
-      console.error('[dsh-passwords] MCP_DSH_ROOT 指定的 dsh 目录不存在，跳过补丁同步');
+      console.error(`[dsh-passwords] ${tr('cli.dshRootMissing')}`);
     }
   } catch (error) {
-    console.error('[dsh-passwords] 补丁同步失败（不影响网关启动）:', error);
+    console.error(`[dsh-passwords] ${tr('cli.patchSyncFailed')}:`, error);
   }
 
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
@@ -169,14 +178,14 @@ async function boot() {
 
   gateway.listen(config.gateway.port, config.gateway.host, () => {
     console.error(
-      `[dsh-passwords] 登录网关(${tlsOn ? 'HTTPS' : 'HTTP'}): ${tlsOn ? 'https' : 'http'}://${config.gateway.host}:${config.gateway.port} → 上游 ${config.gateway.upstream}`,
+      `[dsh-passwords] ${tr('cli.gatewayListening', { mode: tlsOn ? 'HTTPS' : 'HTTP' })}: ${tlsOn ? 'https' : 'http'}://${config.gateway.host}:${config.gateway.port} → ${tr('cli.upstream')} ${config.gateway.upstream}`,
     );
-    console.error(`[dsh-passwords] 数据库(SQLite): ${config.dbPath}`);
+    console.error(`[dsh-passwords] ${tr('cli.db')}: ${config.dbPath}`);
   });
   if (redirect !== null) {
     redirect.listen(config.gateway.redirectPort!, config.gateway.host, () => {
       console.error(
-        `[dsh-passwords] HTTP→HTTPS 跳转: http://${config.gateway.host}:${config.gateway.redirectPort} → 301 https://…（不提供页面内容）`,
+        `[dsh-passwords] ${tr('cli.redirect')}: http://${config.gateway.host}:${config.gateway.redirectPort} → 301 https://…`,
       );
     });
   }
@@ -199,7 +208,7 @@ if (process.argv[2] === 'audit') {
   runPatch(process.argv.slice(3));
 } else {
   boot().catch((error) => {
-    console.error('[dsh-passwords] 启动失败:', error);
+    console.error(`[dsh-passwords] ${tr('cli.startFailed')}:`, error);
     process.exit(1);
   });
 }

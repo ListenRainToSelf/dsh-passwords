@@ -3,10 +3,14 @@
 //   1. 密码策略：≥12 位，大写/小写/数字/符号各至少一位
 //   2. 反 SQL 注入：全链参数化查询（根本防线）+ 输入特征检测（纵深防御）
 //   3. 网络安全审查：审计日志（登录成功/失败/锁定/配置）+ 防暴力破解（5 次失败锁 15 分钟）
+//
+// 错误文案：AuthError 只携带稳定 code + 参数，文案由 i18n.ts 按语言渲染
+// （网关页面按页面语言、dsh 设置卡片按 dsh 语言本地化）。
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import type { PlatformConfig } from './config.js';
 import { Database } from './db.js';
+import { t, type Lang } from './i18n.js';
 
 const BCRYPT_ROUNDS = 10;
 const TOKEN_TTL = '12h';
@@ -17,11 +21,16 @@ const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUN
 
 export class AuthError extends Error {
   constructor(
-    message: string,
     public readonly code: string,
+    public readonly params: Record<string, string | number> = {},
     public readonly status = 400,
   ) {
-    super(message);
+    super(t('zh', `err.${code}`, params));
+  }
+
+  /** 按语言返回用户可读文案（默认 zh；en 跟随 dsh/浏览器语言） */
+  localize(lang: Lang): string {
+    return t(lang, `err.${this.code}`, this.params);
   }
 }
 
@@ -42,26 +51,20 @@ const SQLI_PATTERN =
 export function assertNoSqlInjection(value: unknown, field: string): void {
   if (typeof value !== 'string' || value === '') return;
   if (SQLI_PATTERN.test(value)) {
-    throw new AuthError(`${field} 包含非法字符，已拒绝`, 'SQL_INJECTION_REJECTED', 400);
+    throw new AuthError('SQL_INJECTION_REJECTED', { field });
   }
 }
 
 export function assertUsername(username: unknown): string {
   if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
-    throw new AuthError(
-      '用户名需为 3-32 位字母、数字、下划线或连字符',
-      'INVALID_USERNAME',
-    );
+    throw new AuthError('INVALID_USERNAME');
   }
   return username;
 }
 
 export function assertPassword(password: unknown): string {
   if (typeof password !== 'string' || !PASSWORD_RE.test(password)) {
-    throw new AuthError(
-      '密码需至少 12 位，且必须同时包含大写字母、小写字母、数字、符号各至少一位',
-      'INVALID_PASSWORD',
-    );
+    throw new AuthError('INVALID_PASSWORD');
   }
   return password;
 }
@@ -98,7 +101,7 @@ export class AuthService {
     meta: RequestMeta = {},
   ): Promise<void> {
     if (await this.isInitialized()) {
-      throw new AuthError('平台已初始化，不能重复配置', 'ALREADY_INITIALIZED', 409);
+      throw new AuthError('ALREADY_INITIALIZED', {}, 409);
     }
     // 注入特征拦截（setupKey 与 username 进系统前先查）
     assertNoSqlInjection(input.setupKey, 'setupKey');
@@ -109,7 +112,7 @@ export class AuthService {
         userAgent: meta.userAgent,
         detail: '预设密钥错误',
       });
-      throw new AuthError('预设密钥不正确', 'INVALID_SETUP_KEY', 401);
+      throw new AuthError('INVALID_SETUP_KEY', {}, 401);
     }
     const username = assertUsername(input.username);
     const password = assertPassword(input.password);
@@ -144,7 +147,7 @@ export class AuthService {
         userAgent: meta.userAgent,
         detail: `锁定期间拒绝登录，剩余 ${remainMin} 分钟`,
       });
-      throw new AuthError(`账号已锁定，请 ${remainMin} 分钟后再试`, 'ACCOUNT_LOCKED', 429);
+      throw new AuthError('ACCOUNT_LOCKED', { minutes: remainMin }, 429);
     }
 
     // 2) 凭据校验（统一错误信息，避免用户名枚举；时序上用户不存在也空跑 bcrypt）
@@ -166,11 +169,7 @@ export class AuthService {
           userAgent: meta.userAgent,
           detail: `连续失败 ${count} 次，锁定 ${LOCK_MINUTES} 分钟`,
         });
-        throw new AuthError(
-          `连续失败 ${count} 次，账号已锁定 ${LOCK_MINUTES} 分钟`,
-          'ACCOUNT_LOCKED',
-          429,
-        );
+        throw new AuthError('ACCOUNT_LOCKED_FRESH', { count, minutes: LOCK_MINUTES }, 429);
       }
       await this.db.audit('login_failure', {
         username,
@@ -178,7 +177,7 @@ export class AuthService {
         userAgent: meta.userAgent,
         detail: `第 ${count} 次失败（${MAX_FAILED} 次锁定）`,
       });
-      throw new AuthError('用户名或密码错误', 'INVALID_CREDENTIALS', 401);
+      throw new AuthError('INVALID_CREDENTIALS', {}, 401);
     }
 
     // 3) 成功：清除失败计数 + 记录审计
@@ -201,7 +200,7 @@ export class AuthService {
       const cv = typeof payload.cv === 'number' ? payload.cv : 0;
       return { userId: Number(payload.sub), username: String(payload.username), cv };
     } catch {
-      throw new AuthError('会话无效或已过期', 'INVALID_TOKEN', 401);
+      throw new AuthError('INVALID_TOKEN', {}, 401);
     }
   }
 
@@ -225,9 +224,9 @@ export class AuthService {
     meta: RequestMeta = {},
   ): Promise<void> {
     const targetUser = await this.db.getUserByUsername(target.trim());
-    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (!targetUser) throw new AuthError('NO_SUCH_USER', {}, 404);
     if (caller.role !== 'admin' && caller.username !== targetUser.username) {
-      throw new AuthError('只有主用户可以修改他人密码', 'FORBIDDEN', 403);
+      throw new AuthError('FORBIDDEN_PASSWORD', {}, 403);
     }
     const password = assertPassword(newPassword);
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -251,14 +250,14 @@ export class AuthService {
     meta: RequestMeta = {},
   ): Promise<void> {
     const targetUser = await this.db.getUserByUsername(target.trim());
-    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (!targetUser) throw new AuthError('NO_SUCH_USER', {}, 404);
     if (caller.role !== 'admin' && caller.username !== targetUser.username) {
-      throw new AuthError('只有主用户可以修改他人用户名', 'FORBIDDEN', 403);
+      throw new AuthError('FORBIDDEN_USERNAME', {}, 403);
     }
     const username = assertUsername(newUsername);
     assertNoSqlInjection(username, 'username');
     if (this.db.getUserByUsername(username) !== null) {
-      throw new AuthError('该用户名已被使用', 'USERNAME_TAKEN', 409);
+      throw new AuthError('USERNAME_TAKEN', {}, 409);
     }
     await this.db.updateUsername(targetUser.id, username);
     await this.db.audit('username_changed', {
@@ -279,11 +278,11 @@ export class AuthService {
     password: string,
     meta: RequestMeta = {},
   ): Promise<void> {
-    if (caller.role !== 'admin') throw new AuthError('只有主用户可以分配子用户', 'FORBIDDEN', 403);
+    if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_ADD_USER', {}, 403);
     const name = assertUsername(username);
     assertNoSqlInjection(name, 'username');
     if (this.db.getUserByUsername(name) !== null) {
-      throw new AuthError('该用户名已被使用', 'USERNAME_TAKEN', 409);
+      throw new AuthError('USERNAME_TAKEN', {}, 409);
     }
     const pw = assertPassword(password);
     const hash = await bcrypt.hash(pw, BCRYPT_ROUNDS);
@@ -302,11 +301,11 @@ export class AuthService {
     target: string,
     meta: RequestMeta = {},
   ): Promise<void> {
-    if (caller.role !== 'admin') throw new AuthError('只有主用户可以删除用户', 'FORBIDDEN', 403);
+    if (caller.role !== 'admin') throw new AuthError('FORBIDDEN_REMOVE_USER', {}, 403);
     const targetUser = await this.db.getUserByUsername(target.trim());
-    if (!targetUser) throw new AuthError('目标用户不存在', 'NO_SUCH_USER', 404);
+    if (!targetUser) throw new AuthError('NO_SUCH_USER', {}, 404);
     if (targetUser.username === caller.username) {
-      throw new AuthError('不能删除自己', 'CANNOT_REMOVE_SELF', 400);
+      throw new AuthError('CANNOT_REMOVE_SELF', {}, 400);
     }
     await this.db.deleteUser(targetUser.id);
     this.db.clearLoginAttemptsOf(targetUser.username);
