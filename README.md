@@ -10,7 +10,7 @@ dsh 自带的网页界面没有任何登录功能。放上服务器/云主机后
 
 🏅 已收录于 [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) 生态索引（Infrastructure & Development）与 [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 插件精选列表（Development & Runtime）。
 
-## 两大核心能力
+## 功能一览
 
 ### 1️⃣ 远程连接
 

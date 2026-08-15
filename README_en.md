@@ -10,7 +10,7 @@ dsh's built-in web UI has no login at all. Put it on a server or cloud host and 
 
 🏅 Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) ecosystem index (Infrastructure & Development) and the [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list (Development & Runtime).
 
-## Two core capabilities
+## Features
 
 ### 1️⃣ Remote access
 
