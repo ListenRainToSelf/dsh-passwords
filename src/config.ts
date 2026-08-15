@@ -36,6 +36,14 @@ export interface PlatformConfig {
     redirectPort: number | null;
     /** 公网访问主机（跳转固定用它，防 Host 头反射；留空则用校验后的请求 Host） */
     publicHost: string;
+    /** 证书域名（自动 HTTPS 用；由 MCP_GATEWAY_DOMAIN 或公网 IP 推导 <IP>.sslip.io） */
+    domain: string;
+    /** 自动申请/续期 Let's Encrypt 证书（零配置 HTTPS） */
+    autoTls: boolean;
+    /** ACME 联系邮箱（可选，证书到期提醒用） */
+    acmeEmail: string;
+    /** 使用 Let's Encrypt 测试环境签发（浏览器不信任，仅调试用） */
+    acmeStaging: boolean;
   };
   jwtSecret: string;
   /** 网关内部管理接口密钥（dsh 插件通知网关用；留空则从 SETUP_KEY 派生） */
@@ -65,6 +73,33 @@ export function loadConfig(): PlatformConfig {
     path.resolve(process.cwd(), 'data', 'platform.db'),
   );
 
+  // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
+  // （不能用 readEnv：它会把空值当未设置回退到默认，导致 Windows 上
+  // 尝试 systemctl 报错。）
+  const restartService =
+    process.env.MCP_DSH_RESTART_SERVICE !== undefined
+      ? process.env.MCP_DSH_RESTART_SERVICE.trim()
+      : 'dsh-web';
+
+  // ── 自动 HTTPS（零配置 Let's Encrypt 证书） ────────────────────
+  // 优先级：MCP_GATEWAY_DOMAIN（真实域名）> MCP_GATEWAY_PUBLIC_HOST
+  // （公网 IP → <IP>.sslip.io）> 启动时探测公网 IP（cli.ts 异步补）。
+  // 已配置 TLS_CERT/KEY 时不生效（用户自管证书）。
+  const userTlsCert = readEnv('MCP_GATEWAY_TLS_CERT', '');
+  const userTlsKey = readEnv('MCP_GATEWAY_TLS_KEY', '');
+  const userCerts = userTlsCert !== '' && userTlsKey !== '';
+  const publicHost = readEnv('MCP_GATEWAY_PUBLIC_HOST', '');
+  const autoTlsRaw = readEnv('MCP_GATEWAY_AUTO_TLS', '').trim().toLowerCase();
+  let domain = readEnv('MCP_GATEWAY_DOMAIN', '').trim();
+  if (domain === '' && isPublicIp(publicHost)) domain = `${publicHost}.sslip.io`;
+  const autoOn =
+    autoTlsRaw === '1' || autoTlsRaw === 'true' || autoTlsRaw === 'yes' || autoTlsRaw === 'auto';
+  const autoOff = autoTlsRaw === '0' || autoTlsRaw === 'false' || autoTlsRaw === 'no';
+  // 留空 = 自动判断：未自备证书且未显式关闭即启用（域名由 cli 启动时补全，
+  // 零配置路径会探测公网 IP 推导 <IP>.sslip.io）
+  const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
+  const acmeDir = path.join(path.dirname(dbPath), 'acme');
+
   return {
     setupKey,
     dbPath,
@@ -73,24 +108,38 @@ export function loadConfig(): PlatformConfig {
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
       port: Number(readEnv('MCP_GATEWAY_PORT', '8080')),
       upstream: readEnv('MCP_GATEWAY_UPSTREAM', 'http://127.0.0.1:3080'),
-      tls: (() => {
-        const cert = readEnv('MCP_GATEWAY_TLS_CERT', '');
-        const key = readEnv('MCP_GATEWAY_TLS_KEY', '');
-        return cert && key ? { cert, key } : null;
-      })(),
-      // HTTP→HTTPS 跳转端口：TLS 开启时在 80 提供 301，避免明文服务
+      tls: userCerts
+        ? { cert: userTlsCert, key: userTlsKey }
+        : autoTls
+          ? { cert: path.join(acmeDir, 'fullchain.pem'), key: path.join(acmeDir, 'cert.key.pem') }
+          : null,
+      // HTTP→HTTPS 跳转端口：TLS 开启时在 80 提供 301，避免明文服务；
+      // 自动 HTTPS 默认开 80（同时承载 ACME 挑战应答）
       redirectPort: (() => {
-        const raw = readEnv('MCP_GATEWAY_REDIRECT_PORT', '');
+        const raw = readEnv('MCP_GATEWAY_REDIRECT_PORT', '').trim();
         const n = Number(raw);
-        return raw !== '' && Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+        const explicit = raw !== '' && Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+        if (explicit !== null) return explicit;
+        return autoTls ? 80 : null;
       })(),
-      publicHost: readEnv('MCP_GATEWAY_PUBLIC_HOST', ''),
+      publicHost,
+      domain,
+      autoTls,
+      acmeEmail: readEnv('MCP_GATEWAY_ACME_EMAIL', ''),
+      acmeStaging: ['1', 'true', 'yes'].includes(readEnv('MCP_GATEWAY_ACME_STAGING', '').trim().toLowerCase()),
     },
     jwtSecret,
     internalSecret,
     patch: {
       dshRoot: readEnv('MCP_DSH_ROOT', ''),
-      restartService: readEnv('MCP_DSH_RESTART_SERVICE', 'dsh-web'),
+      restartService,
     },
   };
+}
+
+/** 公网 IPv4 判定（排除私网/环回/链路本地/CGNAT/文档段） */
+export function isPublicIp(value: string): boolean {
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
+  if (!value.split('.').every((part) => Number(part) <= 255)) return false;
+  return !/^(0\.|10\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|198\.18\.|198\.51\.100\.|203\.0\.113\.)/.test(value);
 }

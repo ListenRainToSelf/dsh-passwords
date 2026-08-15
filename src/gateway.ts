@@ -4,6 +4,7 @@
 //   → 已认证请求反向代理到上游 dsh（HTTP + WebSocket，Host 改写为上游地址）
 import http, { type IncomingMessage } from 'node:http';
 import https from 'node:https';
+import { createSecureContext } from 'node:tls';
 import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -772,8 +773,27 @@ export function createGatewayServer(
   const server = hasTls
     ? https.createServer(
         {
+          // 默认证书（启动时读一次）：不带 SNI 的客户端（如 https://127.0.0.1
+          // 直连、插件→网关内部回环调用）不会触发 SNICallback，必须要有默认
+          // cert/key 才能完成握手
           cert: readFileSync(config.gateway.tls!.cert),
           key: readFileSync(config.gateway.tls!.key),
+          // 证书每次 TLS 握手时从文件动态读取：自动续期写入新文件后
+          // 下一个连接即用新证书，无需重启进程
+          SNICallback: (_servername, callback) => {
+            try {
+              callback(
+                null,
+                createSecureContext({
+                  cert: readFileSync(config.gateway.tls!.cert),
+                  key: readFileSync(config.gateway.tls!.key),
+                  minVersion: 'TLSv1.2',
+                }),
+              );
+            } catch (error) {
+              callback(error as Error);
+            }
+          },
           // 仅允许 TLS 1.2+，拒绝老旧协议与弱套件协商
           minVersion: 'TLSv1.2',
         },
@@ -839,16 +859,51 @@ export function createGatewayServer(
 /**
  * HTTP→HTTPS 301 跳转服务器（仅 TLS 模式且配置了 redirectPort 时创建）。
  * 解决“网关裸奔在 80 明文”问题：80 不再提供任何页面内容，只做跳转。
+ * 自动 HTTPS 模式下同时承载 ACME HTTP-01 挑战应答（/.well-known/acme-challenge/*）。
  */
-export function createRedirectServer(config: PlatformConfig): http.Server | null {
+export function createRedirectServer(
+  config: PlatformConfig,
+  challengeStore?: Map<string, string>,
+): http.Server | null {
   if (config.gateway.tls === null || config.gateway.redirectPort === null) return null;
   return http.createServer((req, res) => {
+    // ACME HTTP-01 挑战应答：优先于跳转处理（Let's Encrypt 校验走这里）
+    if (challengeStore) {
+      const pathname = (() => {
+        try {
+          return new URL(req.url ?? '/', 'http://localhost').pathname;
+        } catch {
+          return '/';
+        }
+      })();
+      const prefix = '/.well-known/acme-challenge/';
+      if (pathname.startsWith(prefix)) {
+        const token = pathname.slice(prefix.length).split('/')[0];
+        const keyAuthz =
+          token !== '' && /^[A-Za-z0-9_-]{1,128}$/.test(token)
+            ? challengeStore.get(token)
+            : undefined;
+        if (keyAuthz !== undefined) {
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Length': String(Buffer.byteLength(keyAuthz)),
+            'Cache-Control': 'no-store',
+            Connection: 'close',
+          });
+          res.end(keyAuthz);
+          return;
+        }
+        res.writeHead(404, { 'Content-Length': '0', Connection: 'close' });
+        res.end();
+        return;
+      }
+    }
     // Host 头部可能带跳转端口或 :80 后缀，跳转目标去掉它们；空 Host 回退主端口
     const strip = new RegExp(`:(${config.gateway.redirectPort}|80)$`);
     const rawHost = (req.headers.host ?? '').replace(strip, '');
     // 防 Host 反射（HTTP/1.0 可伪造 Host: evil.com → Location: https://evil.com/）：
-    // 配置了 MCP_GATEWAY_PUBLIC_HOST 时固定用它；否则严格校验请求 Host 格式
-    const candidate = config.gateway.publicHost || rawHost;
+    // 自动 HTTPS 固定用证书域名；否则用配置的公网主机；再否则严格校验请求 Host 格式
+    const candidate = config.gateway.domain || config.gateway.publicHost || rawHost;
     const host =
       /^[A-Za-z0-9.\-[\]:]+$/.test(candidate) && candidate !== ''
         ? candidate

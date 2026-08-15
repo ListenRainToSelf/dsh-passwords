@@ -15,7 +15,9 @@ import { Database } from './db.js';
 import { AuthService } from './auth.js';
 import { createGatewayServer, createRedirectServer } from './gateway.js';
 import { createFieldCrypto } from './encrypt.js';
+import { ensureCertificate, certExpiryMs, detectPublicIp } from './acme.js';
 import { execSync } from 'node:child_process';
+import path from 'node:path';
 import {
   findDshRoot,
   applyRemotePatch,
@@ -149,6 +151,24 @@ async function boot() {
   if (cli.host !== undefined) config.gateway.host = cli.host;
   if (cli.upstream !== undefined) config.gateway.upstream = cli.upstream;
 
+  // ── 自动 HTTPS：域名补全（零配置探测公网 IP → <IP>.sslip.io）+ 端口默认 ──
+  // 失败即拒绝启动（fail-closed）：密码门绝不静默降级为明文 HTTP。
+  // 需要 HTTP 的用户必须显式关闭（MCP_GATEWAY_AUTO_TLS=0）或走 scripts/start-http.mjs。
+  const portExplicit = cli.port !== undefined || process.env.MCP_GATEWAY_PORT !== undefined;
+  if (config.gateway.autoTls) {
+    if (config.gateway.domain === '') {
+      const ip = await detectPublicIp();
+      if (ip !== null) {
+        config.gateway.domain = `${ip}.sslip.io`;
+      } else {
+        console.error(`[dsh-passwords] ${tr('cli.exitNoDomain', { code: 31 })}`);
+        console.error(`[dsh-passwords] ${tr('cli.exitNoDomainHint')}`);
+        process.exit(31);
+      }
+    }
+    if (!portExplicit) config.gateway.port = 443;
+  }
+
   // ── 远程设置补丁：强制启用，网关每次启动自动应用（幂等） ──
   try {
     const root = findDshRoot(config.patch.dshRoot);
@@ -172,23 +192,116 @@ async function boot() {
 
   const auth = new AuthService(config, db);
 
-  const gateway = createGatewayServer(config, auth, db);
-  const redirect = createRedirectServer(config);
-  const tlsOn = config.gateway.tls !== null;
-
-  gateway.listen(config.gateway.port, config.gateway.host, () => {
-    console.error(
-      `[dsh-passwords] ${tr('cli.gatewayListening', { mode: tlsOn ? 'HTTPS' : 'HTTP' })}: ${tlsOn ? 'https' : 'http'}://${config.gateway.host}:${config.gateway.port} → ${tr('cli.upstream')} ${config.gateway.upstream}`,
-    );
-    console.error(`[dsh-passwords] ${tr('cli.db')}: ${config.dbPath}`);
-  });
+  // ── 80 端口：301 跳转 + ACME HTTP-01 挑战应答 ──
+  // 自动 HTTPS 需要先监听 80（Let's Encrypt 从 80 校验挑战），再签发证书
+  const challengeStore = config.gateway.autoTls ? new Map<string, string>() : undefined;
+  const redirect = createRedirectServer(config, challengeStore);
   if (redirect !== null) {
+    redirect.on('error', (error) => {
+      console.error(`[dsh-passwords] ${tr('cli.redirect')}: ${String(error)}`);
+    });
     redirect.listen(config.gateway.redirectPort!, config.gateway.host, () => {
       console.error(
         `[dsh-passwords] ${tr('cli.redirect')}: http://${config.gateway.host}:${config.gateway.redirectPort} → 301 https://…`,
       );
     });
   }
+
+  // ── 自动 HTTPS：申请/续期证书（签发失败 → 拒绝启动，错误码 30） ──
+  if (config.gateway.autoTls && config.gateway.tls !== null && challengeStore !== undefined) {
+    const acmeDir = path.dirname(config.gateway.tls.cert);
+    console.error(`[dsh-passwords] ${tr('cli.acmeIssuing', { domain: config.gateway.domain })}`);
+    try {
+      const result = await ensureCertificate({
+        domain: config.gateway.domain,
+        email: config.gateway.acmeEmail || undefined,
+        staging: config.gateway.acmeStaging,
+        acmeDir,
+        challengeStore,
+      });
+      console.error(
+        `[dsh-passwords] ${tr('cli.acmeIssued', { domain: config.gateway.domain, date: new Date(result.expiresAt).toISOString() })}`,
+      );
+    } catch (error) {
+      const oldExpiry = certExpiryMs(config.gateway.tls.cert);
+      if (oldExpiry !== null && oldExpiry > Date.now()) {
+        // 现有证书仍在有效期内（例如续期因网络抖动失败）：继续用它，后台定时重试续期
+        console.error(`[dsh-passwords] ${tr('cli.acmeFallbackOld')}: ${String(error)}`);
+      } else {
+        // 没有可用证书 → 拒绝启动，绝不静默降级为明文 HTTP
+        console.error(
+          `[dsh-passwords] ${tr('cli.exitCertFailed', { code: 30, error: String(error) })}`,
+        );
+        console.error(`[dsh-passwords] ${tr('cli.exitCertHint')}`);
+        process.exit(30);
+      }
+    }
+    // 续期调度：每天检查一次，到期前 30 天自动续期。
+    // TLS 每次握手动态读证书文件（SNICallback），续期写入后无需重启即生效。
+    if (config.gateway.tls !== null) {
+      setInterval(() => {
+        const expiry = certExpiryMs(config.gateway.tls!.cert);
+        if (expiry !== null && expiry - Date.now() > 30 * 24 * 3600 * 1000) return;
+        void (async () => {
+          try {
+            const result = await ensureCertificate({
+              domain: config.gateway.domain,
+              email: config.gateway.acmeEmail || undefined,
+              staging: config.gateway.acmeStaging,
+              acmeDir,
+              challengeStore,
+            });
+            console.error(
+              `[dsh-passwords] ${tr('cli.acmeIssued', { domain: config.gateway.domain, date: new Date(result.expiresAt).toISOString() })}`,
+            );
+          } catch (error) {
+            console.error(`[dsh-passwords] ${tr('cli.acmeRenewFailed')}: ${String(error)}`);
+          }
+        })();
+      }, 24 * 3600 * 1000);
+    }
+  }
+
+  const tlsOn = config.gateway.tls !== null;
+  const gateway = createGatewayServer(config, auth, db);
+
+  // 端口被占用等监听失败：给出错误码退出（不崩溃在未处理的 error 事件上）
+  gateway.on('error', (error) => {
+    console.error(`[dsh-passwords] ${tr('cli.exitPortBusy', { code: 32, error: String(error) })}`);
+    process.exit(32);
+  });
+
+  gateway.listen(config.gateway.port, config.gateway.host, () => {
+    console.error(
+      `[dsh-passwords] ${tr('cli.gatewayListening', { mode: tlsOn ? 'HTTPS' : 'HTTP' })}: ${tlsOn ? 'https' : 'http'}://${config.gateway.host}:${config.gateway.port} → ${tr('cli.upstream')} ${config.gateway.upstream}`,
+    );
+    console.error(`[dsh-passwords] ${tr('cli.db')}: ${config.dbPath}`);
+    if (!tlsOn) {
+      // 显式关闭自动 HTTPS 才走得到这里：给出醒目危险提示
+      console.error(`[dsh-passwords] ${tr('cli.httpWarning')}`);
+    }
+    if (tlsOn && config.gateway.autoTls && config.gateway.domain !== '') {
+      console.error(
+        `[dsh-passwords] ${tr('cli.publicUrl')}: https://${config.gateway.domain}${config.gateway.port === 443 ? '' : `:${config.gateway.port}`}`,
+      );
+    }
+  });
+
+  // ── 父进程看门狗：由 dsh 插件拉起时（DSH_GATEWAY_PARENT_PID），
+  // 宿主 dsh 退出后密码门随之停止，避免残留进程占用端口 ──
+  const parentPid = Number(process.env.DSH_GATEWAY_PARENT_PID ?? '');
+  if (Number.isInteger(parentPid) && parentPid > 0) {
+    console.error(`[dsh-passwords] ${tr('cli.watchParent', { pid: parentPid })}`);
+    setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch {
+        console.error(`[dsh-passwords] ${tr('cli.parentGone')}`);
+        process.exit(0);
+      }
+    }, 3000);
+  }
+
   process.on('SIGINT', () => {
     gateway.close();
     redirect?.close();
