@@ -63,6 +63,15 @@ bash install.sh
 
 **Windows**：下载仓库里的 `install.bat` 双击运行（或 clone 后运行）。它会自动把项目装到 `%USERPROFILE%\dsh-passwords` 并完成全部配置。Windows 上绑 80/443 **不需要管理员权限**；端口被占用时网关会以错误码 32 提示。
 
+**npm 用户**：
+
+```bash
+npm install -g dsh-passwords
+dsh-passwords install     # 生成随机 SETUP_KEY + 注册插件 + 应用补丁（等价一键安装）
+```
+
+（`dsh-passwords --version` 看版本；`dsh-passwords serve-gateway` 手动启动网关。）
+
 脚本自动完成：装依赖 → 编译 → **生成随机 SETUP_KEY** → 注册为 dsh 插件 → 应用远程设置补丁。
 
 装完屏幕最后会显示**首次配置密钥（SETUP_KEY）**，同时也写进了安装目录的 `setup-key.txt`。**初始化完成后请删除该文件**——它只用于第一次初始化，删了不影响以后使用。

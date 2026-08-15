@@ -16,8 +16,10 @@ import { AuthService } from './auth.js';
 import { createGatewayServer, createRedirectServer } from './gateway.js';
 import { createFieldCrypto } from './encrypt.js';
 import { ensureCertificate, certExpiryMs, detectPublicIp } from './acme.js';
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   findDshRoot,
   applyRemotePatch,
@@ -314,8 +316,36 @@ async function boot() {
   });
 }
 
-// CLI 分发：audit | patch | serve-gateway
-if (process.argv[2] === 'audit') {
+/** 包根目录（dist/cli.js → 项目根） */
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** 一键安装：npm 包场景复用 scripts/install.mjs（预构建检测自动跳过依赖/编译） */
+function runInstall(): void {
+  const script = path.join(PACKAGE_ROOT, 'scripts', 'install.mjs');
+  if (!existsSync(script)) {
+    console.error(`[dsh-passwords] ${tr('cli.installScriptMissing', { path: script })}`);
+    process.exit(1);
+  }
+  const result = spawnSync(process.execPath, [script], {
+    cwd: PACKAGE_ROOT,
+    stdio: 'inherit',
+  });
+  process.exit(result.status ?? 1);
+}
+
+// CLI 分发：install | audit | patch | serve-gateway（--version/-v 打印版本）
+if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[2] === 'version') {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    console.log(pkg.version ?? 'unknown');
+  } catch {
+    console.log('unknown');
+  }
+} else if (process.argv[2] === 'install') {
+  runInstall();
+} else if (process.argv[2] === 'audit') {
   runAudit(process.argv.slice(3));
 } else if (process.argv[2] === 'patch') {
   runPatch(process.argv.slice(3));

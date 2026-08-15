@@ -113,6 +113,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'cli.httpWarning': '⚠ 密码门运行在【明文 HTTP】模式：登录密码与会话 Cookie 将以明文传输，可能被网络中间人嗅探。公网部署请优先使用自动 HTTPS。',
     'cli.watchParent': '跟随宿主 dsh 进程（PID {pid}），宿主退出时自动停止',
     'cli.parentGone': '宿主 dsh 进程已退出，密码门随其停止',
+    'cli.installScriptMissing': '找不到一键安装脚本：{path}',
   },
   en: {
     'err.ALREADY_INITIALIZED': 'The platform is already initialized and cannot be set up again',
@@ -204,6 +205,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     'cli.httpWarning': '⚠ The gateway is running in PLAIN HTTP mode: passwords and session cookies travel in cleartext and can be sniffed. Prefer automatic HTTPS for public deployments.',
     'cli.watchParent': 'following the host dsh process (PID {pid}); exits when the host exits',
     'cli.parentGone': 'the host dsh process exited, the gateway stops with it',
+    'cli.installScriptMissing': 'one-click install script not found: {path}',
   },
 };
 

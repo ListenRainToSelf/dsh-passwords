@@ -63,6 +63,15 @@ bash install.sh
 
 **Windows**: download `install.bat` from the repo and double-click it (or run it after cloning). It installs the project into `%USERPROFILE%\dsh-passwords` and completes all configuration. Binding ports 80/443 needs **no admin rights** on Windows; if a port is occupied, the gate exits with error code 32.
 
+**npm users**:
+
+```bash
+npm install -g dsh-passwords
+dsh-passwords install     # generates a random SETUP_KEY, registers the plugin and applies the patch (one-click equivalent)
+```
+
+(`dsh-passwords --version` prints the version; `dsh-passwords serve-gateway` runs the gateway manually.)
+
 The script handles everything: install dependencies → build → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
 
 At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **Delete that file after your first-time setup** — it is only needed once.

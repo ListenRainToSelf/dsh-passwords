@@ -67,11 +67,16 @@ if (run('pnpm --version', { quiet: true }) !== 0) {
 }
 say('pnpm ✓');
 
-// ── 4. 依赖 + 编译 ──
-say('安装依赖…');
-run('npm install --no-audit --no-fund');
-say('编译…');
-run('npm run build');
+// ── 4. 依赖 + 编译（npm 包已预构建时自动跳过：node_modules + dist 存在） ──
+const prebuilt = existsSync(path.join(root, 'node_modules')) && existsSync(path.join(root, 'dist', 'cli.js'));
+if (prebuilt) {
+  say('检测到已构建产物，跳过依赖安装与编译');
+} else {
+  say('安装依赖…');
+  run('npm install --no-audit --no-fund');
+  say('编译…');
+  run('npm run build');
+}
 
 // ── 5. 生成 .env（已存在则不覆盖，重跑安全） ──
 let setupKey = '';

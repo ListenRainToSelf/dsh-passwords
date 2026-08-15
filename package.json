@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "dsh-passwords: a login gateway (password door) + dsh settings plugin for DeepSeek Harness web UI — first-run setup, SQLite auth with at-rest encryption, rate-limit, audit log, TLS + 80-to-443 redirect, in-settings user management and remote-access patch control (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -53,6 +53,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/slywalker2006/dsh-passwords.git"
+  },
+  "homepage": "https://github.com/slywalker2006/dsh-passwords",
+  "bugs": {
+    "url": "https://github.com/slywalker2006/dsh-passwords/issues"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
