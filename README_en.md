@@ -69,7 +69,7 @@ At the end the script prints your **setup key (SETUP_KEY)** on screen; it is als
 
 ### 2. Finish setup in three steps
 
-1. Start dsh the way you normally do (e.g. `DEEPSEEK_API_KEY=sk-yourkey dsh web`) — **the password gate starts automatically, no extra commands**
+1. Start dsh the way you normally do (with dsh's model key already configured, just run `dsh web` — the gate itself needs no extra configuration) — **the password gate starts automatically, no extra commands**
 2. Open `https://<server-IP>.sslip.io` in a browser — on the first visit it **automatically shows the first-time setup page**; enter the SETUP_KEY and create the owner account (no need to type `/gateway/setup` manually)
 3. From now on, everyone visiting `https://<server-IP>.sslip.io` must pass the login page first
 
