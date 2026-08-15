@@ -11,7 +11,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 import jwt from 'jsonwebtoken';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, type PlatformConfig } from './config.js';
 import { Database, type UserListRow } from './db.js';
 import { createFieldCrypto } from './encrypt.js';
@@ -104,6 +109,113 @@ function notifyGateway(cfg: PlatformConfig): void {
     // 网关没起来时静默：下次网关启动会自动应用补丁
   });
   req.end(body);
+}
+
+/** 网关启动错误码（与 cli.ts 保持一致）：30 证书签发失败 / 31 无公网域名 / 32 端口被占 */
+const EXIT_CERT_FAILED = 30;
+const EXIT_NO_DOMAIN = 31;
+
+/** 探测网关是否已在监听（防止 dsh 重启/多开时重复拉起） */
+function gatewayAlreadyRunning(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port, timeout: 400 });
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => resolve(false));
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * 自动拉起外部密码门：dsh 启动时（本插件被加载）spawn 网关子进程，
+ * 无需任何额外启动命令。dsh 退出时（ctx.dispose）子进程随停；
+ * 网关侧另有父进程看门狗兜底（宿主被强杀时自己退出）。
+ */
+function startGateway(ctx: Context, cfg: PlatformConfig): void {
+  const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const cliPath = path.join(installRoot, 'dist', 'cli.js');
+  const gatewayPort = cfg.gateway.port;
+
+  ctx.effect(
+    () => {
+      const noop = () => {};
+      if (!existsSync(cliPath)) {
+        console.error('[dsh-passwords] 密码门未编译（缺少 dist/cli.js）：请先到安装目录运行 npm install && npm run build');
+        return noop;
+      }
+      if (process.env.DSH_PASSWORDS_NO_AUTOSTART === '1') return noop;
+      let disposed = false;
+      let child: ChildProcess | null = null;
+
+      void gatewayAlreadyRunning(gatewayPort).then((running) => {
+        if (disposed) return;
+        if (running) {
+          console.error(`[dsh-passwords] 密码门已在运行（端口 ${String(gatewayPort)}），跳过自动拉起`);
+          return;
+        }
+        // 网关上游 = dsh 自己的 web 端口（webServer 服务在运行时可知；拿不到就退回默认 3080）。
+        // 用户显式配置过 MCP_GATEWAY_UPSTREAM（.env/环境变量）则尊重之，不自动覆盖。
+        let upstreamPort = 3080;
+        try {
+          const wsPort = (ctx.webServer as unknown as { port?: number }).port;
+          if (typeof wsPort === 'number' && wsPort > 0) upstreamPort = wsPort;
+        } catch {
+          // 拿不到就用默认值
+        }
+        const explicitUpstream = process.env.MCP_GATEWAY_UPSTREAM?.trim() ?? '';
+        const gatewayArgs =
+          explicitUpstream !== ''
+            ? [cliPath, 'serve-gateway']
+            : [cliPath, 'serve-gateway', '--upstream', `http://127.0.0.1:${String(upstreamPort)}`];
+        child = spawn(process.execPath, gatewayArgs, {
+          cwd: installRoot,
+          env: {
+            ...process.env,
+            DSH_GATEWAY_PARENT_PID: String(process.pid),
+            DSH_PASSWORDS_ENV_FILE: path.join(installRoot, '.env'),
+          },
+          stdio: ['ignore', 'inherit', 'inherit'],
+        });
+        child.on('error', (error) => {
+          console.error('[dsh-passwords] 密码门拉起失败:', error);
+        });
+        child.on('exit', (code, signal) => {
+          if (disposed) return;
+          const reason = code ?? signal ?? 'unknown';
+          if (reason === EXIT_CERT_FAILED) {
+            console.error('[dsh-passwords] 密码门未启动（错误码 30：HTTPS 证书签发失败）。检查 80/443 端口与网络；或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+          } else if (reason === EXIT_NO_DOMAIN) {
+            console.error('[dsh-passwords] 密码门未启动（错误码 31：无法确定公网 IP/域名）。或运行 scripts/start-http.mjs 改用明文 HTTP（有被嗅探风险）');
+          } else {
+            console.error(`[dsh-passwords] 密码门进程已退出（code=${String(reason)}）。重启 dsh 会自动再次拉起`);
+          }
+        });
+      });
+
+      return () => {
+        disposed = true;
+        if (child !== null && child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGTERM');
+          const force = setTimeout(() => {
+            if (child !== null && child.exitCode === null) {
+              try {
+                child.kill('SIGKILL');
+              } catch {
+                // 已退出
+              }
+            }
+          }, 3000);
+          force.unref();
+        }
+      };
+    },
+    'dsh-passwords: gateway autostart',
+  );
 }
 
 export function apply(ctx: Context): void {
@@ -311,4 +423,7 @@ export function apply(ctx: Context): void {
     },
     'dsh-passwords: user management routes',
   );
+
+  // 自动拉起密码门（.env 未配置时跳过，避免在未安装的环境里误启）
+  if (configured) startGateway(ctx, cfg);
 }

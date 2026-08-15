@@ -3,6 +3,8 @@ dist/
 web/dist/
 .env
 *.log
+setup-key.txt
+*.tgz
 tls/
 tls.key
 tls.crt

@@ -1,0 +1,82 @@
+#!/usr/bin/env node
+// 把 dsh-passwords 注册进 dsh web profile（精确版，install.sh 调用）。
+//
+// 为什么不用 dsh 自带的 `dsh plugin add`：
+//   它的 reconcile 会把 profile 里【所有】声明 dsh.bundle 的依赖全部加入
+//   bundles 层。若用户之前装过其它独立插件（如 @linxin666 系列，它们同时
+//   又被 dsh-web-ui-all 加载），会触发 duplicate loader entry id，dsh 直接
+//   启动失败。本脚本只精确追加 dsh-passwords 一个条目，其余配置不动。
+//
+// 行为（幂等）：
+//   1. 确保 ~/.dsh/profiles/web 存在（不存在则按 dsh 模板初始化）
+//   2. dependencies 加入 "dsh-passwords": "link:<本包路径>"
+//   3. dsh.profile.bundles 末尾追加 dsh-passwords（已在则跳过）
+//   4. pnpm install 物化 link
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const installRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const dshHome = process.env.DSH_HOME?.trim() || path.join(homedir(), '.dsh');
+const profileDir = path.join(dshHome, 'profiles', 'web');
+
+const WEB_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'];
+const PATCH_TEMPLATE = `# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; \`!!js\` expressions allowed).
+[]
+`;
+const WORKSPACE = `packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+`;
+
+mkdirSync(profileDir, { recursive: true });
+
+// 1) 读取/初始化 profile manifest（字段与 dsh 的 initProfile 模板一致）
+const manifestPath = path.join(profileDir, 'package.json');
+let manifest;
+if (existsSync(manifestPath)) {
+  manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+} else {
+  manifest = {
+    name: 'dsh-profile-web',
+    private: true,
+    dependencies: {},
+    dsh: { profile: { bundles: [...WEB_BUNDLES] } },
+  };
+}
+
+// 2) 依赖 + bundles（只动 dsh-passwords 一个条目）
+manifest.dependencies = manifest.dependencies ?? {};
+manifest.dependencies['dsh-passwords'] = `link:${installRoot}`;
+manifest.dsh = manifest.dsh ?? {};
+manifest.dsh.profile = manifest.dsh.profile ?? {};
+manifest.dsh.profile.bundles = manifest.dsh.profile.bundles ?? [...WEB_BUNDLES];
+if (!manifest.dsh.profile.bundles.includes('dsh-passwords')) {
+  manifest.dsh.profile.bundles.push('dsh-passwords');
+}
+writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n');
+
+// 3) 缺失的配套文件按 dsh 模板补齐（已存在的不动）
+const patchPath = path.join(profileDir, 'cordis.patch.yml');
+if (!existsSync(patchPath)) writeFileSync(patchPath, PATCH_TEMPLATE);
+const workspacePath = path.join(profileDir, 'pnpm-workspace.yaml');
+if (!existsSync(workspacePath)) writeFileSync(workspacePath, WORKSPACE);
+
+// 4) pnpm 物化 link（Windows 需经 shell 调 .cmd shim）
+console.log(`[dsh-passwords] profile: ${profileDir}`);
+const result = spawnSync('pnpm', ['install'], {
+  cwd: profileDir,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+});
+if (result.error !== undefined) {
+  console.error(`[dsh-passwords] 运行 pnpm 失败：${String(result.error)}（请先 npm install -g pnpm）`);
+  process.exit(127);
+}
+process.exit(result.status ?? 1);

@@ -1,6 +1,6 @@
 {
   "name": "dsh-passwords",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "dsh-passwords: a login gateway (password door) + dsh settings plugin for DeepSeek Harness web UI — first-run setup, SQLite auth with at-rest encryption, rate-limit, audit log, TLS + 80-to-443 redirect, in-settings user management and remote-access patch control (bilingual zh/en UI)",
   "type": "module",
   "main": "dist/index.js",
@@ -41,6 +41,9 @@
   ],
   "files": [
     "dist/",
+    "scripts/",
+    "install.sh",
+    "install.bat",
     "cordis.yml",
     "README.md",
     "README_en.md",
