@@ -21,6 +21,10 @@ import {
   folderAllowed,
   isUploadRequest,
   isGitRequest,
+  isAionuiFileRead,
+  isAionuiFileWrite,
+  isAionuiPanel,
+  aionuiRootFrom,
   isWorkspaceWrite,
   isStaticAsset,
   WORKSPACE_ENDPOINT_RE,
@@ -954,13 +958,25 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (!perms.allow_git_download && isGitRequest(parsed.pathname)) {
+        if (!perms.allow_git_download && (isGitRequest(parsed.pathname) || isAionuiFileRead(req.method, parsed.pathname))) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noGit')));
+          return;
+        }
+        if (!perms.allow_upload && isAionuiFileWrite(req.method, parsed.pathname)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
         if (perms.allowed_folders.length > 0 && isWorkspaceWrite(parsed.pathname)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
+        }
+        // aionui-panel 文件树：GET/HEAD 的 root 在 query 里，直接校验白名单（拦截目录浏览/下载）
+        if (perms.allowed_folders.length > 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+          const aionuiRoot = aionuiRootFrom(req.method, parsed.pathname, parsed.searchParams, null);
+          if (aionuiRoot !== null && !folderAllowed(aionuiRoot, perms.allowed_folders)) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
         }
         if (!isStaticAsset(parsed.pathname)) {
           const usage = touchUsageThrottled(user.userId);
@@ -1000,6 +1016,7 @@ export function createGatewayServer(
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     // 请求上挂的用户/权限（子用户才有）
     const reqAs = req as Req;
+    // 请求上挂的用户/权限（子用户才有）
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,
@@ -1157,7 +1174,7 @@ export function createGatewayServer(
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.allowed_folders.length > 0 &&
       (req.method === 'POST' || req.method === 'PUT') &&
-      WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname);
+      (WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname) || isAionuiPanel(parsedUrl.pathname));
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.sandbox_mode !== null &&
@@ -1212,10 +1229,15 @@ export function createGatewayServer(
         if (needsFolderCheck) {
           let targetPath: string | null = null;
           if (bodyObj !== null) {
-            targetPath = extractPathFromBody(bodyObj);
-            if (targetPath === null) {
-              const wid = extractWorkspaceId(bodyObj);
-              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+            if (isAionuiPanel(parsedUrl.pathname)) {
+              // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
+              targetPath = aionuiRootFrom(req.method, parsedUrl.pathname, parsedUrl.searchParams, bodyObj);
+            } else {
+              targetPath = extractPathFromBody(bodyObj);
+              if (targetPath === null) {
+                const wid = extractWorkspaceId(bodyObj);
+                if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+              }
             }
           }
           if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {

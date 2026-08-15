@@ -182,19 +182,70 @@ export function forceRejectApproval(value: unknown, depth = 0): boolean {
 
 // ── 上传 / git 拦截的路径判定（纯路径 + 方法，不读请求体） ──────────────
 
-/** 上传相关端点：dsh-file-uploads 插件 + dsh-file-path 的"复制到工作区"桥 */
+/** 上传相关端点：dsh-file-uploads 插件 + dsh-file-path 的"复制到工作区"桥 + dsh-ssh 远程上传 */
 export function isUploadRequest(method: string, pathname: string): boolean {
   if (method !== 'POST' && method !== 'PUT') return false;
   return (
     pathname === '/api/dsh-uploads' ||
     pathname === '/api/filePathBridge/importFile' ||
-    pathname === '/api/dsh-uploads/'
+    pathname === '/api/dsh-uploads/' ||
+    pathname === '/api/dsh-ssh/upload'
   );
 }
 
-/** git 相关端点（dsh 内置 git 工具 / git-graph 插件等，尽力匹配） */
+/**
+ * git 相关端点（dsh 内置 git 工具 / git-graph 插件 / aionui-panel 的 git 面板等，尽力匹配）。
+ * 同时覆盖“从服务器拿走数据”的其它通道：session.export（会话日志 ZIP）与 dsh-ssh 的远程文件下载。
+ */
 export function isGitRequest(pathname: string): boolean {
-  return /\/api\/[^/]*(git|clone|pull|fetch)[^/]*/i.test(pathname);
+  return (
+    /\/api\/[^/]*(git|clone|pull|fetch)[^/]*/i.test(pathname) ||
+    /^\/aionui-panel\/git[-.]/.test(pathname) ||
+    /^\/api\/session[.\/]export/.test(pathname) ||
+    /^\/api\/dsh-ssh[.\/](download|ls)/.test(pathname)
+  );
+}
+
+/** aionui-panel 文件树：读取/下载文件内容的端点（raw 为 GET 流式传输，read 为 POST JSON） */
+export function isAionuiFileRead(method: string, pathname: string): boolean {
+  if (pathname === '/aionui-panel/raw') return method === 'GET' || method === 'HEAD';
+  return method === 'POST' && pathname === '/aionui-panel/read';
+}
+
+/** aionui-panel 文件树：写文件/删除的端点（与上传权限对称） */
+export function isAionuiFileWrite(method: string, pathname: string): boolean {
+  if (method !== 'POST' && method !== 'PUT' && method !== 'DELETE') return false;
+  return (
+    pathname === '/aionui-panel/write' ||
+    pathname === '/aionui-panel/delete' ||
+    pathname === '/aionui-panel/git-stage' ||
+    pathname === '/aionui-panel/git-unstage' ||
+    pathname === '/aionui-panel/git-discard'
+  );
+}
+
+/** aionui-panel 文件树：任意端点（用于 allowedFolders 白名单校验 root） */
+export function isAionuiPanel(pathname: string): boolean {
+  return pathname.startsWith('/aionui-panel/');
+}
+
+/** 从 aionui-panel 请求中提取 root（工作区路径）：GET/HEAD 取 query，POST 取 JSON body */
+export function aionuiRootFrom(
+  method: string,
+  pathname: string,
+  query: URLSearchParams,
+  bodyJson: unknown,
+): string | null {
+  if (!isAionuiPanel(pathname)) return null;
+  if (method === 'GET' || method === 'HEAD') {
+    const root = query.get('root');
+    return root !== null && root.length > 0 ? root : null;
+  }
+  if (typeof bodyJson === 'object' && bodyJson !== null) {
+    const root = (bodyJson as Record<string, unknown>).root;
+    return typeof root === 'string' && root.length > 0 ? root : null;
+  }
+  return null;
 }
 
 /** 工作区创建/删除等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
