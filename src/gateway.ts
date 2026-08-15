@@ -27,6 +27,8 @@ import {
   aionuiRootFrom,
   isWorkspaceWrite,
   isStaticAsset,
+  isPollingRequest,
+  isUsageAnchorRequest,
   WORKSPACE_ENDPOINT_RE,
   extractPathFromBody,
   filterByPathField,
@@ -978,16 +980,21 @@ export function createGatewayServer(
             return;
           }
         }
-        if (!isStaticAsset(parsed.pathname)) {
-          const usage = touchUsageThrottled(user.userId);
-          if (usage) {
-            if (perms.daily_minutes_limit !== null && usage.active_seconds >= perms.daily_minutes_limit * 60) {
-              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.timeLimit')));
-              return;
-            }
-            if (perms.hourly_token_limit !== null && usage.hourly_tokens >= perms.hourly_token_limit) {
-              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.tokenLimit')));
-              return;
+        if (!isStaticAsset(parsed.pathname) && !isPollingRequest(parsed.pathname)) {
+          // 配额计时从子用户“说第一句话”（发消息锚点）才开始：
+          // 未使用过的子用户（无当日记录且非锚点请求）不创建记录、不受配额限制
+          const day = todayLocal();
+          if (db.getUsage(user.userId, day) !== null || isUsageAnchorRequest(parsed.pathname)) {
+            const usage = touchUsageThrottled(user.userId);
+            if (usage) {
+              if (perms.daily_minutes_limit !== null && usage.active_seconds >= perms.daily_minutes_limit * 60) {
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.timeLimit')));
+                return;
+              }
+              if (perms.hourly_token_limit !== null && usage.hourly_tokens >= perms.hourly_token_limit) {
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.tokenLimit')));
+                return;
+              }
             }
           }
         }

@@ -325,3 +325,35 @@ export function isStaticAsset(pathname: string): boolean {
     pathname === '/favicon.ico'
   );
 }
+
+/**
+ * 配额计时锚点：子用户“说第一句话”才启动当日计时（发消息端点）。
+ * 页面浏览/轮询等不会创建用量记录——未开始使用的子用户不受配额限制。
+ */
+export function isUsageAnchorRequest(pathname: string): boolean {
+  return (
+    /^\/api\/session[.\/]prompt$/.test(pathname) ||
+    /^\/api\/subagent[.\/]prompt$/.test(pathname) ||
+    /^\/api\/agent[.\/]prompt$/.test(pathname)
+  );
+}
+
+/**
+ * 轮询 / 心跳 / SSE 事件流端点：页面开着就持续请求，不代表真实使用，
+ * 不计入每日使用时长（否则子用户只要开着页面就把时长配额耗尽）。
+ */
+export function isPollingRequest(pathname: string): boolean {
+  return (
+    pathname === '/api/pet/state' ||
+    pathname === '/api/pair/heartbeat' ||
+    pathname === '/api/pair/status' ||
+    pathname === '/api/events.mux' ||
+    pathname === '/api/events.host' ||
+    pathname === '/plugins/events' ||
+    pathname.startsWith('/aionui-panel/events') ||
+    pathname === '/api/live-stats' ||
+    pathname === '/api/session.title' ||
+    /^\/api\/[^/]*heartbeat[^/]*/.test(pathname) ||
+    /^\/api\/[^/]*poll[^/]*/.test(pathname)
+  );
+}
