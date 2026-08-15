@@ -2,11 +2,11 @@
 
 [简体中文](README.md) | English
 
-A **password gate** for DeepSeek Harness (dsh): safe **remote access** plus **multi-user** accounts.
+A **server-grade gateway** for DeepSeek Harness (dsh): it turns dsh from a local, single-user tool into a **multi-tenant platform** people can use remotely.
 
-dsh's built-in web UI has no login at all. Put it on a server or cloud host and anyone with the address can use it — and burn your API key. dsh-passwords puts a login page in front of dsh: everyone sees the login page first, and only correct credentials get through.
+dsh's built-in web UI has no login, no permissions, and no usage controls — put it on a server and anyone with the URL can use it and burn your API key. dsh-passwords puts a gateway in front of dsh: unauthenticated visitors see the login page first; after sign-in, every account is subject to **per-account permission and quota enforcement**.
 
-> **One-liner: dsh-passwords = dsh's remote-access front door + a multi-user account system.** You don't need it for purely local use; but if the access URL isn't localhost, install it first.
+> **One-liner: dsh-passwords is the layer that turns dsh into a real server product.** Enterprise distribution, API relay/reseller stations issuing sub-accounts to customers, and teams sharing one box are its target use cases. You don't need it for purely local use; but if the access URL isn't localhost, install it first.
 
 🏅 Listed in the [Awesome DeepSeek Harness](https://github.com/0xsline/awesome-deepseek-harness) ecosystem index (Infrastructure & Development) and the [Awesome DSH Plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) list (Development & Runtime).
 
@@ -26,6 +26,19 @@ dsh's built-in web UI has no login at all. Put it on a server or cloud host and 
 - All account management happens in a card on dsh's settings page — no SSH needed: change passwords, change usernames, create/delete subusers
 - The owner manages all subusers; subusers can only change themselves
 - Changing a password immediately invalidates all old sessions; every login and failure is logged — one command shows who signed in when
+
+### 3️⃣ Permissions & quotas
+
+The owner can configure, per subuser, from the settings page:
+
+- **Workspace allowlist**: a subuser only sees and opens the folders you assign
+- **Hourly token limit** and **daily usage-time limit**: requests are rejected once the cap is hit
+- **Sandbox level**: read-only / workspace-write / full access; when a subuser's AI tries to escalate beyond its level, the gateway forces the approval to "reject"
+- **Upload / git-download toggles** and **ban subusers**
+
+### 4️⃣ Collaboration
+
+- A chat button in the bottom-left corner: owner ↔ subuser messages with tags (issue / pull request / discussion / announcement / question)
 
 ## Screenshots
 
@@ -147,6 +160,8 @@ After logging in to dsh, open **Settings → Plugins** to find the "dsh-password
 | **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
 | **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
 | **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
+| **Subuser permissions** | Owner only | Workspace allowlist, hourly token limit, daily time limit, sandbox level, upload/git-download toggles, ban |
+| **Chat / messages** | All signed-in users | Chat button in the bottom-left corner, with tags (issue/pull request/discussion/announcement/question) |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
 - Passwords follow the same rule as the login page: at least 12 characters with uppercase, lowercase, digits and symbols.

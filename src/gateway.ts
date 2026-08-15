@@ -16,9 +16,34 @@ import { URL } from 'node:url';
 import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
-import { Database } from './db.js';
+import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
+import {
+  folderAllowed,
+  isUploadRequest,
+  isGitRequest,
+  isWorkspaceWrite,
+  isStaticAsset,
+  WORKSPACE_ENDPOINT_RE,
+  extractPathFromBody,
+  filterByPathField,
+  collectIdPathPairs,
+  extractWorkspaceId,
+  findStringField,
+  sandboxPresetRank,
+  permissionPresetFromCommand,
+  presetFromSettingsMutate,
+  forceRejectApproval,
+  SANDBOX_RANK,
+  todayLocal,
+} from './permissions.js';
 import { findDshRoot, applyRemotePatch, restartDshWeb } from './patch.js';
 import { t, resolveGatewayLang, type Lang } from './i18n.js';
+
+/** 网关内部扩展请求：权限执行时把用户/权限附在 req 上，供后续中间件与代理读取 */
+type Req = Request & {
+  dshpwUser?: number;
+  dshpwPerms?: UserPermissionsRow;
+};
 
 const COOKIE_NAME = 'dsh_gateway_token';
 /** 语言偏好 cookie（用户在登录页手动切换后持久化） */
@@ -466,6 +491,9 @@ export function createGatewayServer(
   // 避免每个代理请求都新建一次 TCP 握手
   const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: 64, keepAliveMsecs: 30_000 });
 
+  // workspaceId → 规范路径 映射：从 workspace.list 响应里收集，供 session.create 用 workspaceId 时解析路径
+  const workspacePathById = new Map<string, string>();
+
   /**
    * 从 Cookie 校验会话；返回用户或 null（用户已不存在时旧 token 立即失效）。
    * 性能：同一 token 的验签 + 用户存在性查询结果缓存 30 秒——每个代理
@@ -497,6 +525,63 @@ export function createGatewayServer(
       return user;
     } catch {
       return null;
+    }
+  }
+
+  /** 子用户权限：缺行时返回默认（全量允许、未封禁） */
+  function effectivePermissions(userId: number): UserPermissionsRow {
+    return (
+      db.getPermissions(userId) ?? {
+        user_id: userId,
+        allowed_folders: [],
+        hourly_token_limit: null,
+        daily_minutes_limit: null,
+        allow_upload: true,
+        allow_git_download: true,
+        banned: false,
+        sandbox_mode: null,
+        updated_at: '',
+      }
+    );
+  }
+
+  /** 从会话 cookie 解析完整用户（含角色）；无会话/失效返回 null */
+  function authedUser(req: Request): { userId: number; username: string; role: 'admin' | 'user' } | null {
+    const s = sessionOf(req);
+    if (!s) return null;
+    const row = db.getUserById(s.userId);
+    if (!row) return null;
+    return { userId: row.id, username: row.username, role: row.role === 'admin' ? 'admin' : 'user' };
+  }
+
+  /** 统一 403 页面（封禁 / 权限拒绝） */
+  function forbiddenPage(lang: Lang, message: string): string {
+    return `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>403</title></head><body style="font-family:system-ui;background:#0f1115;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1 style="margin:0 0 8px">403</h1><p style="margin:0;opacity:.7">${escapeHtml(message)}</p></div></body></html>`;
+  }
+
+  /** 用量节流：每 15 秒最多写一次活跃时间，返回当前用量（用于配额判定） */
+  const usageThrottle = new Map<number, number>();
+  function touchUsageThrottled(userId: number) {
+    const now = Date.now();
+    const day = todayLocal();
+    const last = usageThrottle.get(userId) ?? 0;
+    if (now - last >= 15000) {
+      usageThrottle.set(userId, now);
+      return db.touchUsage(userId, day, new Date().toISOString());
+    }
+    return db.getUsage(userId, day);
+  }
+
+  // ── 留言 / 聊天（SSE 广播） ────────────────────────────────
+  const chatClients = new Set<Response>();
+  function broadcastMessage(msg: MessageRow): void {
+    const payload = `data: ${JSON.stringify(msg)}\n\n`;
+    for (const client of chatClients) {
+      try {
+        client.write(payload);
+      } catch {
+        chatClients.delete(client);
+      }
     }
   }
 
@@ -653,6 +738,191 @@ export function createGatewayServer(
     }, 500);
   });
 
+  // ── 内部辅助：API 路由的输入清洗 ───────────────────────────
+  const nullableInt = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    if (!Number.isInteger(n) || n < 0) return null;
+    return n;
+  };
+  const stringArray = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 64) : [];
+
+  // 统一 API 鉴权：跨站拒绝 + 会话校验 + 可选主用户门控
+  const apiAuth = (req: Request, res: Response, requireAdmin = false) => {
+    if (req.headers['sec-fetch-site'] === 'cross-site') {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN_CSRF', error: 'forbidden' });
+      return null;
+    }
+    const user = authedUser(req);
+    if (!user) {
+      res.status(401).json({ ok: false, code: 'NOT_AUTHENTICATED', error: '未登录或会话已失效' });
+      return null;
+    }
+    if (requireAdmin && user.role !== 'admin') {
+      res.status(403).json({ ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+      return null;
+    }
+    return user;
+  };
+
+  const jsonBody = express.json({ limit: '256kb' });
+
+  // ── 概览（仅主用户）：所有用户 + 权限 + 当日用量 ─────────────
+  app.get('/gateway/api/overview', (req, res) => {
+    const me = apiAuth(req, res, true);
+    if (!me) return;
+    const day = todayLocal();
+    const users = db.listUsers().map((u) => {
+      const perms = effectivePermissions(u.id);
+      const usage = db.getUsage(u.id, day);
+      return {
+        id: u.id,
+        username: u.username,
+        role: u.role,
+        permissions: {
+          allowedFolders: perms.allowed_folders,
+          hourlyTokenLimit: perms.hourly_token_limit,
+          dailyMinutesLimit: perms.daily_minutes_limit,
+          allowUpload: perms.allow_upload,
+          allowGitDownload: perms.allow_git_download,
+          banned: perms.banned,
+          sandboxMode: perms.sandbox_mode,
+        },
+        usage: usage
+          ? {
+              day: usage.day,
+              activeSeconds: usage.active_seconds,
+              hourlyTokens: usage.hourly_tokens,
+              firstSeenAt: usage.first_seen_at,
+              lastActiveAt: usage.last_active_at,
+            }
+          : null,
+      };
+    });
+    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, users });
+  });
+
+  // ── 更新某子用户权限（仅主用户） ─────────────────────────────
+  app.post('/gateway/api/permissions', jsonBody, (req, res) => {
+    const me = apiAuth(req, res, true);
+    if (!me) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const userId = Number(body.userId);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'userId 无效' });
+      return;
+    }
+    const target = db.getUserById(userId);
+    if (!target) {
+      res.status(404).json({ ok: false, code: 'NO_SUCH_USER', error: '用户不存在' });
+      return;
+    }
+    if (target.role === 'admin') {
+      res.status(400).json({ ok: false, code: 'FORBIDDEN', error: '不能修改主用户权限' });
+      return;
+    }
+    const allowedFolders = stringArray(body.allowedFolders);
+    const hourlyTokenLimit = nullableInt(body.hourlyTokenLimit);
+    const dailyMinutesLimit = nullableInt(body.dailyMinutesLimit);
+    const allowUpload = body.allowUpload !== false;
+    const allowGitDownload = body.allowGitDownload !== false;
+    const banned = body.banned === true;
+    const rawSandbox = typeof body.sandboxMode === 'string' ? body.sandboxMode : '';
+    const sandboxMode =
+      rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
+        ? rawSandbox
+        : null;
+    db.setPermissions(userId, {
+      allowedFolders,
+      hourlyTokenLimit,
+      dailyMinutesLimit,
+      allowUpload,
+      allowGitDownload,
+      banned,
+      sandboxMode,
+    });
+    db.audit('permissions_changed', {
+      username: target.username,
+      detail: JSON.stringify({
+        allowedFolders,
+        hourlyTokenLimit,
+        dailyMinutesLimit,
+        allowUpload,
+        allowGitDownload,
+        banned,
+        sandboxMode,
+      }),
+    });
+    res.json({ ok: true });
+  });
+
+  // ── token 用量上报（客户端 liveTokenUsage 投影增量，所有登录用户） ──
+  // 替代旧的 HTTP 响应正则计量：客户端复用 dsh 的 tokenUsage 投影（与
+  // dsh-web-ui 同源），只上报「增量」，服务端按小时窗口累计并用于配额判定。
+  app.post('/gateway/api/usage/report', jsonBody, (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const tokens = Number(body.tokens);
+    if (!Number.isFinite(tokens) || tokens < 0 || tokens > 100_000_000) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: 'tokens 无效' });
+      return;
+    }
+    const rounded = Math.round(tokens);
+    if (rounded <= 0) {
+      res.json({ ok: true });
+      return;
+    }
+    db.addTokens(me.userId, todayLocal(), rounded, new Date().toISOString());
+    res.json({ ok: true });
+  });
+
+  // ── 留言列表（所有登录用户；按收件人过滤） ─────────────────────
+  app.get('/gateway/api/messages', (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const all = db.listMessages(300);
+    const mine = all.filter(
+      (m) => m.recipient_id === null || m.recipient_id === me.userId || m.sender_id === me.userId,
+    );
+    res.json({ ok: true, me: { id: me.userId, username: me.username, role: me.role }, messages: mine });
+  });
+
+  // ── 发送留言（所有登录用户） ─────────────────────────────────
+  app.post('/gateway/api/messages', jsonBody, (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const content = typeof body.content === 'string' ? body.content.trim() : '';
+    if (content === '') {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '内容不能为空' });
+      return;
+    }
+    if (content.length > 4000) {
+      res.status(400).json({ ok: false, code: 'INVALID', error: '内容过长' });
+      return;
+    }
+    const recipientId = nullableInt(body.recipientId);
+    const tags = stringArray(body.tags).slice(0, 8);
+    const msg = db.addMessage(me.userId, recipientId, content, tags);
+    broadcastMessage(msg);
+    res.json({ ok: true, message: msg });
+  });
+
+  // ── SSE 实时推送（所有登录用户） ─────────────────────────────
+  app.get('/gateway/api/messages/stream', (req, res) => {
+    const me = apiAuth(req, res);
+    if (!me) return;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write(`data: ${JSON.stringify({ type: 'init', me: { id: me.userId, username: me.username, role: me.role } })}\n\n`);
+    chatClients.add(res);
+    req.on('close', () => chatClients.delete(res));
+  });
+
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
   // 路径先用 WHATWG URL 规范化（. / .. / %2e%2e 均被归一），再做前缀判断——
   // 否则 /gateway/../api/xxx 会绕过前缀检查直达上游（dsh 侧 new URL 同样
@@ -661,10 +931,55 @@ export function createGatewayServer(
     try {
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       if (parsed.pathname.startsWith('/gateway/')) return next();
-      if (sessionOf(req)) return next();
-      // 重定向兼容层：记录原始 URL，登录后跳回
-      const nextUrl = encodeURIComponent(req.originalUrl);
-      res.redirect(302, `/gateway/login?next=${nextUrl}`);
+      const user = sessionOf(req);
+      if (!user) {
+        // 重定向兼容层：记录原始 URL，登录后跳回
+        const nextUrl = encodeURIComponent(req.originalUrl);
+        res.redirect(302, `/gateway/login?next=${nextUrl}`);
+        return;
+      }
+      const row = db.getUserById(user.userId);
+      if (!row) {
+        res.redirect(302, `/gateway/login?next=${encodeURIComponent(req.originalUrl)}`);
+        return;
+      }
+      if (row.role !== 'admin') {
+        const perms = effectivePermissions(user.userId);
+        const lang = langOf(req);
+        if (perms.banned) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
+          return;
+        }
+        if (!perms.allow_upload && isUploadRequest(req.method, parsed.pathname)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
+          return;
+        }
+        if (!perms.allow_git_download && isGitRequest(parsed.pathname)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noGit')));
+          return;
+        }
+        if (perms.allowed_folders.length > 0 && isWorkspaceWrite(parsed.pathname)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
+          return;
+        }
+        if (!isStaticAsset(parsed.pathname)) {
+          const usage = touchUsageThrottled(user.userId);
+          if (usage) {
+            if (perms.daily_minutes_limit !== null && usage.active_seconds >= perms.daily_minutes_limit * 60) {
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.timeLimit')));
+              return;
+            }
+            if (perms.hourly_token_limit !== null && usage.hourly_tokens >= perms.hourly_token_limit) {
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.tokenLimit')));
+              return;
+            }
+          }
+        }
+        // 附上权限与用户，供后续文件夹限制中间件 / 代理 token 计量使用
+        (req as Req).dshpwUser = user.userId;
+        (req as Req).dshpwPerms = perms;
+      }
+      return next();
     } catch {
       res.redirect(302, '/gateway/login');
     }
@@ -683,6 +998,8 @@ export function createGatewayServer(
     delete headers['content-length'];
 
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
+    // 请求上挂的用户/权限（子用户才有）
+    const reqAs = req as Req;
     const upstreamReq = http.request(
       {
         hostname: upstreamHost,
@@ -732,6 +1049,73 @@ export function createGatewayServer(
           return;
         }
 
+        // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
+        if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(parsedUrl.pathname)) {
+          const chunks: Buffer[] = [];
+          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+          upstreamRes.on('end', () => {
+            try {
+              let body = Buffer.concat(chunks);
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
+              collectIdPathPairs(parsed, workspacePathById);
+              const restricted =
+                reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_folders.length > 0;
+              const outBody = restricted
+                ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
+                : parsed;
+              const out = Buffer.from(JSON.stringify(outBody), 'utf8');
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              delete respHeaders['content-length'];
+              delete respHeaders['content-encoding'];
+              respHeaders['content-length'] = String(out.length);
+              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              res.end(out);
+            } catch {
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              res.end(Buffer.concat(chunks));
+            }
+          });
+          upstreamRes.on('error', () => res.destroy());
+          return;
+        }
+
+        // ── session.list 响应过滤：受限子用户只看得到白名单内工作区的会话 ──
+        if (
+          reqAs.dshpwPerms !== undefined &&
+          reqAs.dshpwPerms.allowed_folders.length > 0 &&
+          req.method === 'POST' &&
+          /^\/api\/session[.\/]list$/.test(parsedUrl.pathname)
+        ) {
+          const chunks: Buffer[] = [];
+          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+          upstreamRes.on('end', () => {
+            try {
+              let body = Buffer.concat(chunks);
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              const filtered = filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'cwd');
+              const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              delete respHeaders['content-length'];
+              delete respHeaders['content-encoding'];
+              respHeaders['content-length'] = String(out.length);
+              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              res.end(out);
+            } catch {
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              res.end(Buffer.concat(chunks));
+            }
+          });
+          upstreamRes.on('error', () => res.destroy());
+          return;
+        }
+
         // ── 非 HTML：原样流式转发 ───────────────────────────────────
         const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
         // dsh 对插件/静态资源返回 no-cache（或不给缓存头），浏览器每次
@@ -766,7 +1150,124 @@ export function createGatewayServer(
     res.on('close', () => {
       if (!res.writableEnded) upstreamReq.destroy();
     });
-    req.pipe(upstreamReq);
+    // 受限子用户的请求体缓冲检查（尽力而为）：
+    //   1) 文件夹白名单：session.create/fork 的 cwd/workspaceId 必须在授权目录内
+    //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
+    const needsFolderCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwPerms.allowed_folders.length > 0 &&
+      (req.method === 'POST' || req.method === 'PUT') &&
+      WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname);
+    const needsSandboxCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwPerms.sandbox_mode !== null &&
+      (req.method === 'POST' || req.method === 'PUT') &&
+      /^\/api\/settings[.\/]/.test(parsedUrl.pathname);
+    // 沙盒切换的实际主路径是 /permission slash 命令：经 commands/execute RPC
+    // （body { agentId, line }，line 形如 "/permission workspace-write"），
+    // 而不是 settings.mutate。这里对受限子用户同样做越权预设检查。
+    const needsCommandCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwPerms.sandbox_mode !== null &&
+      (req.method === 'POST' || req.method === 'PUT') &&
+      /^\/api\/commands[.\/]execute$/.test(parsedUrl.pathname);
+    // AI 提权审批：沙盒升级经 /api/respond（body { sessionId, approvalId, outcome }）。
+    // 受限子用户（sandbox_mode 非空）即使点了“允许”，也强制改成 rejected，把 AI 的
+    // 越权提权直接取消。ask_user_question 用的是 answer 字段，不会被这里误伤。
+    const needsApprovalCheck =
+      reqAs.dshpwPerms !== undefined &&
+      reqAs.dshpwPerms.sandbox_mode !== null &&
+      (req.method === 'POST' || req.method === 'PUT') &&
+      /^\/api\/respond$/.test(parsedUrl.pathname);
+
+    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck) {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let settled = false;
+      const MAX_BODY = 64 * 1024;
+      req.on('data', (chunk: Buffer) => {
+        if (settled) return;
+        size += chunk.length;
+        if (size > MAX_BODY) {
+          // 超大 body（不会出现在 session.create / settings.mutate）：不检查，直接透传
+          settled = true;
+          upstreamReq.write(Buffer.concat(chunks));
+          upstreamReq.write(chunk);
+          req.pipe(upstreamReq);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        if (settled) return;
+        settled = true;
+        const lang = langOf(req);
+        let bodyObj: unknown = null;
+        try {
+          bodyObj = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        } catch {
+          bodyObj = null;
+        }
+
+        if (needsFolderCheck) {
+          let targetPath: string | null = null;
+          if (bodyObj !== null) {
+            targetPath = extractPathFromBody(bodyObj);
+            if (targetPath === null) {
+              const wid = extractWorkspaceId(bodyObj);
+              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+            }
+          }
+          if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+
+        if (needsSandboxCheck && bodyObj !== null) {
+          const preset = presetFromSettingsMutate(bodyObj);
+          const assignedRank =
+            SANDBOX_RANK[reqAs.dshpwPerms!.sandbox_mode as keyof typeof SANDBOX_RANK] ?? 0;
+          const targetRank = preset === null ? assignedRank : sandboxPresetRank(preset);
+          if (targetRank > assignedRank) {
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.sandboxDenied')));
+            return;
+          }
+        }
+
+        if (needsCommandCheck && bodyObj !== null) {
+          const line = findStringField(bodyObj, 'line');
+          const preset = line === null ? null : permissionPresetFromCommand(line);
+          if (preset !== null) {
+            const assignedRank =
+              SANDBOX_RANK[reqAs.dshpwPerms!.sandbox_mode as keyof typeof SANDBOX_RANK] ?? 0;
+            const targetRank = sandboxPresetRank(preset);
+            if (targetRank > assignedRank) {
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.sandboxDenied')));
+              return;
+            }
+          }
+        }
+
+        // 审批响应改写：受限子用户的 AI 提权审批一律强制 rejected（返回取消）
+        let forwardBody = Buffer.concat(chunks);
+        if (needsApprovalCheck && bodyObj !== null && typeof bodyObj === 'object') {
+          if (forceRejectApproval(bodyObj)) {
+            forwardBody = Buffer.from(JSON.stringify(bodyObj), 'utf8');
+          }
+        }
+
+        upstreamReq.end(forwardBody);
+      });
+      req.on('error', () => {
+        if (!settled) {
+          settled = true;
+          upstreamReq.destroy();
+        }
+      });
+    } else {
+      req.pipe(upstreamReq);
+    }
   });
 
   const hasTls = config.gateway.tls !== null;

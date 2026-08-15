@@ -412,6 +412,24 @@ export function apply(ctx: Context): void {
         writeJson(res, 202, { ok: true, message: '补丁重载中：dsh 网页服务即将重启（约 3-5 秒）' });
       },
     },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/workspaces',
+      handler: (req, res) => {
+        const caller = guard(req, res);
+        if (!caller) return;
+        // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
+        try {
+          const reg = ctx.get('workspaceRegistry') as unknown as
+            | { list(): Array<{ path: string; title: string }> }
+            | undefined;
+          const workspaces = (reg?.list() ?? []).map((w) => ({ path: w.path, title: w.title }));
+          writeJson(res, 200, { ok: true, workspaces });
+        } catch {
+          writeJson(res, 200, { ok: true, workspaces: [] });
+        }
+      },
+    },
   ];
 
   ctx.effect(

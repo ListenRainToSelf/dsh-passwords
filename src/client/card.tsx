@@ -28,6 +28,41 @@ export interface PatchState {
   whitelist: boolean;
 }
 
+export interface PermOverview {
+  me: { id: number; username: string; role: 'admin' | 'user' };
+  users: Array<{
+    id: number;
+    username: string;
+    role: 'admin' | 'user';
+    permissions: {
+      allowedFolders: string[];
+      hourlyTokenLimit: number | null;
+      dailyMinutesLimit: number | null;
+      allowUpload: boolean;
+      allowGitDownload: boolean;
+      banned: boolean;
+      sandboxMode: string | null;
+    };
+    usage: {
+      day: string;
+      activeSeconds: number;
+      hourlyTokens: number;
+      firstSeenAt: string | null;
+      lastActiveAt: string | null;
+    } | null;
+  }>;
+}
+
+interface PermDraft {
+  folders: string[];
+  token: string;
+  minutes: string;
+  upload: boolean;
+  git: boolean;
+  banned: boolean;
+  sandbox: string;
+}
+
 /** 与 host 侧一致的最小密码策略（本机提示用，最终以服务端校验为准） */
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
@@ -107,12 +142,41 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   // 新增子用户表单
   const [addName, setAddName] = useState('');
   const [addPw, setAddPw] = useState('');
+  // 权限管理（仅主用户）
+  const [overview, setOverview] = useState<PermOverview | null>(null);
+  const [permDrafts, setPermDrafts] = useState<Record<number, PermDraft>>({});
+  const [workspaces, setWorkspaces] = useState<Array<{ path: string; title: string }>>([]);
 
   const refresh = () => {
     api<StateData>('/api/dsh-passwords/state')
       .then((d) => {
         setData(d);
         setError('');
+        if (d.me?.role === 'admin') {
+          api<PermOverview>('/gateway/api/overview')
+            .then((o) => {
+              setOverview(o);
+              const drafts: Record<number, PermDraft> = {};
+              for (const u of o.users) {
+                if (u.role === 'user') {
+                  drafts[u.id] = {
+                    folders: [...(u.permissions.allowedFolders ?? [])],
+                    token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
+                    minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
+                    upload: u.permissions.allowUpload,
+                    git: u.permissions.allowGitDownload,
+                    banned: u.permissions.banned,
+                    sandbox: u.permissions.sandboxMode ?? '',
+                  };
+                }
+              }
+              setPermDrafts(drafts);
+              api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
+                .then((r) => setWorkspaces(r.workspaces ?? []))
+                .catch(() => setWorkspaces([]));
+            })
+            .catch(() => setOverview(null));
+        }
       })
       .catch((e) => setError(errText(e, t)));
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
@@ -179,6 +243,30 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const removeUser = (username: string) => {
     if (!window.confirm(t('delConfirm', { username }))) return;
     void run(() => api('/api/dsh-passwords/users/remove', { target: username }), t('deleted'));
+  };
+
+  // 权限草稿更新 + 保存（仅主用户）
+  const setDraft = (userId: number, patch: Partial<PermDraft>) => {
+    setPermDrafts((prev) => ({ ...prev, [userId]: { ...prev[userId], ...patch } }));
+  };
+
+  const savePermissions = (userId: number) => {
+    const d = permDrafts[userId];
+    if (!d) return;
+    void run(
+      () =>
+        api('/gateway/api/permissions', {
+          userId,
+          allowedFolders: d.folders,
+          hourlyTokenLimit: d.token.trim() === '' ? null : Number(d.token),
+          dailyMinutesLimit: d.minutes.trim() === '' ? null : Number(d.minutes),
+          allowUpload: d.upload,
+          allowGitDownload: d.git,
+          banned: d.banned,
+          sandboxMode: d.sandbox === '' ? null : d.sandbox,
+        }),
+      t('permsSaved'),
+    );
   };
 
   // 管理员的目标用户下拉：列出全部用户（默认自己，即当前账号在列表中的那一项）
@@ -258,6 +346,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h('input', {
         className: 'dshpw-input',
         type: 'password',
+        autoComplete: 'new-password',
         placeholder: t('newPwPh'),
         value: pwNew,
         onChange: (e: { target: { value: string } }) => setPwNew(e.target.value),
@@ -265,6 +354,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h('input', {
         className: 'dshpw-input',
         type: 'password',
+        autoComplete: 'new-password',
         placeholder: t('confirmPwPh'),
         value: pwConfirm,
         onChange: (e: { target: { value: string } }) => setPwConfirm(e.target.value),
@@ -329,6 +419,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         h('input', {
           className: 'dshpw-input',
           type: 'password',
+          autoComplete: 'new-password',
           placeholder: t('subPwPh'),
           value: addPw,
           onChange: (e: { target: { value: string } }) => setAddPw(e.target.value),
@@ -339,6 +430,133 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           h('button', { className: 'dshpw-btn', disabled: busy, onClick: addSubUser }, t('addSub')),
         ),
         h('div', { className: 'dshpw-hint' }, t('subHint')),
+      ),
+
+    // ── 子用户权限（仅主用户） ──
+    isAdmin &&
+      overview !== null &&
+      h(
+        'div',
+        { className: 'dshpw-section' },
+        h('span', { className: 'dshpw-label' }, t('perms')),
+        h('div', { className: 'dshpw-hint' }, t('permsHint')),
+        ...overview.users
+          .filter((u) => u.role === 'user')
+          .map((u) => {
+            const d = permDrafts[u.id];
+            if (!d) return null;
+            return h(
+              'div',
+              { className: 'dshpw-perm', key: u.id },
+              h(
+                'div',
+                { className: 'dshpw-perm-head' },
+                h('strong', null, u.username),
+                u.usage
+                  ? h(
+                      'span',
+                      { className: 'dshpw-hint' },
+                      `${t('usageTime')} ${Math.round(u.usage.activeSeconds / 60)}m · ${t('usageTokens')} ${u.usage.hourlyTokens}`,
+                    )
+                  : null,
+                u.permissions.banned ? h('span', { className: 'dshpw-badge' }, t('banned')) : null,
+              ),
+              h(
+                'select',
+                {
+                  className: 'dshpw-input',
+                  value: d.folders[0] ?? '',
+                  'aria-label': t('permsFolders'),
+                  onChange: (e: { target: { value: string } }) =>
+                    setDraft(u.id, { folders: e.target.value === '' ? [] : [e.target.value] }),
+                },
+                h('option', { value: '' }, t('permsAll')),
+                ...((() => {
+                  const paths = Array.from(new Set([...workspaces.map((w) => w.path), ...d.folders]));
+                  return paths.map((p) => {
+                    const ws = workspaces.find((w) => w.path === p);
+                    return h('option', { key: p, value: p }, ws?.title || p);
+                  });
+                })()),
+              ),
+              h(
+                'select',
+                {
+                  className: 'dshpw-input',
+                  value: d.sandbox,
+                  'aria-label': t('permsSandbox'),
+                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { sandbox: e.target.value }),
+                },
+                h('option', { value: '' }, t('sandboxNone')),
+                h('option', { value: 'read-only' }, t('sandboxReadOnly')),
+                h('option', { value: 'workspace-write' }, t('sandboxWorkspace')),
+                h('option', { value: 'danger-full-access' }, t('sandboxFull')),
+              ),
+              h(
+                'div',
+                { className: 'dshpw-row' },
+                h('input', {
+                  className: 'dshpw-input',
+                  type: 'number',
+                  min: 0,
+                  placeholder: t('permsToken'),
+                  value: d.token,
+                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { token: e.target.value }),
+                }),
+                h('input', {
+                  className: 'dshpw-input',
+                  type: 'number',
+                  min: 0,
+                  placeholder: t('permsMinutes'),
+                  value: d.minutes,
+                  onChange: (e: { target: { value: string } }) => setDraft(u.id, { minutes: e.target.value }),
+                }),
+              ),
+              h(
+                'div',
+                { className: 'dshpw-row' },
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.upload,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { upload: e.target.checked }),
+                  }),
+                  t('permsUpload'),
+                ),
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.git,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { git: e.target.checked }),
+                  }),
+                  t('permsGit'),
+                ),
+                h(
+                  'label',
+                  { className: 'dshpw-check' },
+                  h('input', {
+                    type: 'checkbox',
+                    checked: d.banned,
+                    onChange: (e: { target: { checked: boolean } }) => setDraft(u.id, { banned: e.target.checked }),
+                  }),
+                  t('permsBanned'),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dshpw-row' },
+                h(
+                  'button',
+                  { className: 'dshpw-btn', disabled: busy, onClick: () => savePermissions(u.id) },
+                  t('permsSave'),
+                ),
+              ),
+            );
+          }),
       ),
 
     error && h('div', { className: 'dshpw-error' }, error),

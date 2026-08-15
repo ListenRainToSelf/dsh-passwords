@@ -47,6 +47,41 @@ export interface AuditLogRow {
   created_at: string;
 }
 
+/** 子用户权限（对应 user_permissions 表；缺行 = 默认全量权限） */
+export interface UserPermissionsRow {
+  user_id: number;
+  allowed_folders: string[];
+  hourly_token_limit: number | null;
+  daily_minutes_limit: number | null;
+  allow_upload: boolean;
+  allow_git_download: boolean;
+  banned: boolean;
+  sandbox_mode: string | null;
+  updated_at: string;
+}
+
+/** 用户用量（对应 user_usage 表） */
+export interface UsageRow {
+  user_id: number;
+  day: string;
+  first_seen_at: string | null;
+  last_active_at: string | null;
+  active_seconds: number;
+  hourly_window_start: string | null;
+  hourly_tokens: number;
+}
+
+/** 留言/聊天消息（含发送者用户名，列表时联表带出） */
+export interface MessageRow {
+  id: number;
+  sender_id: number;
+  sender_name: string;
+  recipient_id: number | null;
+  content: string;
+  tags: string[];
+  created_at: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +116,48 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(username_hash, ip_hash)
 );
+CREATE TABLE IF NOT EXISTS user_permissions (
+  user_id            INTEGER PRIMARY KEY,
+  allowed_folders    TEXT,                          -- JSON 字符串数组（绝对路径）
+  hourly_token_limit INTEGER,                       -- NULL = 不限
+  daily_minutes_limit INTEGER,                      -- NULL = 不限
+  allow_upload       INTEGER NOT NULL DEFAULT 1,
+  allow_git_download INTEGER NOT NULL DEFAULT 1,
+  banned             INTEGER NOT NULL DEFAULT 0,
+  sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
+  updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS user_usage (
+  user_id             INTEGER,
+  day                 TEXT,                          -- YYYY-MM-DD（本地时区）
+  first_seen_at       TEXT,                          -- 当日首次使用时间（ISO）
+  last_active_at      TEXT,                          -- 最近活跃时间（ISO，用于累计活跃跨度）
+  active_seconds      INTEGER NOT NULL DEFAULT 0,
+  hourly_window_start TEXT,                          -- 当前小时窗口起点（ISO）
+  hourly_tokens       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, day)
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_id    INTEGER NOT NULL,
+  recipient_id INTEGER,                              -- NULL = 广播给所有人
+  content      TEXT NOT NULL,
+  tags         TEXT NOT NULL DEFAULT '[]',           -- JSON 字符串数组
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id DESC);
 `;
+
+/** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
+function parseJsonArray(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 export class Database {
   private db: DatabaseSync;
@@ -112,6 +188,7 @@ export class Database {
     this.db.exec('PRAGMA secure_delete = ON');
     this.db.exec(SCHEMA);
     this.migrateRoles();
+    this.migratePermissions();
     const changedUsers = this.migrateUsers();
     const changedAudit = this.migrateAuditLogs();
     const changedAttempts = this.migrateLoginAttempts();
@@ -141,6 +218,14 @@ export class Database {
     const hasAdmin = this.stmt("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").get();
     if (!hasAdmin) {
       this.db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)");
+    }
+  }
+
+  // ── 迁移：user_permissions 补 sandbox_mode 列 ─────────────────
+  private migratePermissions(): void {
+    const cols = this.stmt('PRAGMA table_info(user_permissions)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'sandbox_mode')) {
+      this.db.exec('ALTER TABLE user_permissions ADD COLUMN sandbox_mode TEXT');
     }
   }
 
@@ -431,5 +516,173 @@ export class Database {
       this.crypto.lookupHash(username),
       this.crypto.lookupHash(ip),
     );
+  }
+
+  // ── 子用户权限（网关强制执行） ────────────────────────────
+  getPermissions(userId: number): UserPermissionsRow | null {
+    const row = this.stmt(
+      'SELECT user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode, updated_at FROM user_permissions WHERE user_id = ?',
+    ).get(userId) as
+      | {
+          user_id: number;
+          allowed_folders: string | null;
+          hourly_token_limit: number | null;
+          daily_minutes_limit: number | null;
+          allow_upload: number;
+          allow_git_download: number;
+          banned: number;
+          sandbox_mode: string | null;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      user_id: row.user_id,
+      allowed_folders: parseJsonArray(row.allowed_folders),
+      hourly_token_limit: row.hourly_token_limit,
+      daily_minutes_limit: row.daily_minutes_limit,
+      allow_upload: row.allow_upload === 1,
+      allow_git_download: row.allow_git_download === 1,
+      banned: row.banned === 1,
+      sandbox_mode: row.sandbox_mode,
+      updated_at: row.updated_at,
+    };
+  }
+
+  setPermissions(
+    userId: number,
+    perms: {
+      allowedFolders: string[];
+      hourlyTokenLimit: number | null;
+      dailyMinutesLimit: number | null;
+      allowUpload: boolean;
+      allowGitDownload: boolean;
+      banned: boolean;
+      sandboxMode: string | null;
+    },
+  ): void {
+    this.stmt(
+      `INSERT INTO user_permissions (user_id, allowed_folders, hourly_token_limit, daily_minutes_limit, allow_upload, allow_git_download, banned, sandbox_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         allowed_folders = excluded.allowed_folders,
+         hourly_token_limit = excluded.hourly_token_limit,
+         daily_minutes_limit = excluded.daily_minutes_limit,
+         allow_upload = excluded.allow_upload,
+         allow_git_download = excluded.allow_git_download,
+         banned = excluded.banned,
+         sandbox_mode = excluded.sandbox_mode,
+         updated_at = datetime('now')`,
+    ).run(
+      userId,
+      JSON.stringify(perms.allowedFolders),
+      perms.hourlyTokenLimit,
+      perms.dailyMinutesLimit,
+      perms.allowUpload ? 1 : 0,
+      perms.allowGitDownload ? 1 : 0,
+      perms.banned ? 1 : 0,
+      perms.sandboxMode,
+    );
+  }
+
+  // ── 用户用量（时间 / token 配额） ─────────────────────────
+  getUsage(userId: number, day: string): UsageRow | null {
+    const row = this.stmt(
+      'SELECT user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens FROM user_usage WHERE user_id = ? AND day = ?',
+    ).get(userId, day) as UsageRow | undefined;
+    return row ?? null;
+  }
+
+  /** 记录活跃时间：从 last_active_at 起累计活跃跨度（30 秒内视为连续活跃） */
+  touchUsage(userId: number, day: string, nowIso: string): UsageRow {
+    const existing = this.getUsage(userId, day);
+    if (!existing) {
+      this.stmt(
+        'INSERT INTO user_usage (user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens) VALUES (?, ?, ?, ?, 0, ?, 0)',
+      ).run(userId, day, nowIso, nowIso, nowIso);
+      return this.getUsage(userId, day)!;
+    }
+    let delta = 0;
+    if (existing.last_active_at) {
+      const last = new Date(existing.last_active_at).getTime();
+      const now = new Date(nowIso).getTime();
+      if (now > last) {
+        delta = Math.round(Math.min((now - last) / 1000, 30));
+      }
+    }
+    this.stmt(
+      'UPDATE user_usage SET last_active_at = ?, active_seconds = active_seconds + ? WHERE user_id = ? AND day = ?',
+    ).run(nowIso, delta, userId, day);
+    return this.getUsage(userId, day)!;
+  }
+
+  /** 累计 token 用量（小时窗口起点不在当前窗口时自动重置计数） */
+  addTokens(userId: number, day: string, tokens: number, nowIso: string): UsageRow {
+    const existing = this.getUsage(userId, day);
+    if (!existing) {
+      this.stmt(
+        'INSERT INTO user_usage (user_id, day, first_seen_at, last_active_at, active_seconds, hourly_window_start, hourly_tokens) VALUES (?, ?, ?, ?, 0, ?, ?)',
+      ).run(userId, day, nowIso, nowIso, nowIso, tokens);
+      return this.getUsage(userId, day)!;
+    }
+    const windowStart = existing.hourly_window_start ?? nowIso;
+    const windowAge = new Date(nowIso).getTime() - new Date(windowStart).getTime();
+    if (windowAge >= 3600_000) {
+      this.stmt(
+        'UPDATE user_usage SET hourly_window_start = ?, hourly_tokens = ? WHERE user_id = ? AND day = ?',
+      ).run(nowIso, tokens, userId, day);
+    } else {
+      this.stmt('UPDATE user_usage SET hourly_tokens = hourly_tokens + ? WHERE user_id = ? AND day = ?').run(
+        tokens,
+        userId,
+        day,
+      );
+    }
+    return this.getUsage(userId, day)!;
+  }
+
+  // ── 留言 / 聊天 ───────────────────────────────────────────
+  listMessages(limit = 100): MessageRow[] {
+    const rows = this.stmt(
+      `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
+       FROM messages m JOIN users u ON u.id = m.sender_id
+       ORDER BY m.id DESC LIMIT ?`,
+    ).all(Math.min(Math.max(limit, 1), 500)) as unknown as {
+      id: number;
+      sender_id: number;
+      username: string;
+      recipient_id: number | null;
+      content: string;
+      tags: string;
+      created_at: string;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      sender_id: row.sender_id,
+      sender_name: this.crypto.decrypt(row.username) ?? '',
+      recipient_id: row.recipient_id,
+      content: row.content,
+      tags: parseJsonArray(row.tags),
+      created_at: row.created_at,
+    }));
+  }
+
+  addMessage(senderId: number, recipientId: number | null, content: string, tags: string[]): MessageRow {
+    const result = this.stmt('INSERT INTO messages (sender_id, recipient_id, content, tags) VALUES (?, ?, ?, ?)').run(
+      senderId,
+      recipientId,
+      content,
+      JSON.stringify(tags),
+    );
+    const sender = this.getUserById(senderId);
+    return {
+      id: Number(result.lastInsertRowid),
+      sender_id: senderId,
+      sender_name: sender?.username ?? '',
+      recipient_id: recipientId,
+      content,
+      tags,
+      created_at: new Date().toISOString(),
+    };
   }
 }

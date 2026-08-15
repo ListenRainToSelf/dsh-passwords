@@ -7,6 +7,8 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type {} from '@deepseek-ai/dsh-client-ui-slots/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import { DshPasswordsCard } from './card';
+import { ChatLauncher } from './chat';
+import { TokenReporter } from './token';
 import { zh, en } from './locales';
 
 /** 卡片样式：全部使用 dsh 设计令牌（--dsw-alias-*），颜色/主题与官方 PluginCard 完全一致 */
@@ -24,10 +26,10 @@ const CSS = `
 .dshpw-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:12px 0 14px;display:flex;flex-direction:column;gap:14px}
 .dshpw-section{display:flex;flex-direction:column;gap:8px}
 .dshpw-label{display:block;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}
-.dshpw-input{width:100%;padding:7px 10px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;transition:border-color .15s,box-shadow .15s}
+.dshpw-input{width:100%;box-sizing:border-box;min-width:0;padding:7px 10px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:8px;transition:border-color .15s,box-shadow .15s}
 .dshpw-input:focus{outline:none;border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
 .dshpw-input::placeholder{color:var(--dsw-alias-label-tertiary)}
-.dshpw-btn{appearance:none;border:0;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5;font-weight:500;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);cursor:pointer}
+.dshpw-btn{appearance:none;border:0;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5;font-weight:500;background:var(--dsw-alias-brand-primary);color:#fff;cursor:pointer}
 .dshpw-btn:hover:not(:disabled){filter:brightness(1.1)}
 .dshpw-btn:disabled{opacity:.4;cursor:default}
 .dshpw-btn.danger{background:none;border:1px solid var(--dsw-alias-label-error);color:var(--dsw-alias-label-error)}
@@ -35,6 +37,12 @@ const CSS = `
 .dshpw-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .dshpw-user{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dshpw-user:last-child{border-bottom:none}
+.dshpw-perm{border:1px solid var(--dsw-alias-border-l2);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.dshpw-perm-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dshpw-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.dshpw-check input{accent-color:var(--dsw-alias-brand-primary)}
+.dshpw-input select,.dshpw-input.multi{height:auto;min-height:36px}
+.dshpw-input[multiple]{height:auto;min-height:72px}
 .dshpw-badge{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);margin-left:6px;white-space:nowrap}
 .dshpw-badge.admin{border-color:var(--dsw-alias-label-warning,#f7ad31);color:var(--dsw-alias-label-warning,#f7ad31)}
 .dshpw-error{color:var(--dsw-alias-label-error);font-size:12px}
@@ -61,6 +69,29 @@ export function apply(ctx: ClientContext): void {
         inject: () => ({}),
       },
       DshPasswordsCard,
+    ),
+  );
+
+  // 全局聊天入口：左下角圆形按钮 + 居中弹窗（shell.overlay 槽，root 作用域）
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'dsh-passwords-chat',
+        order: 100,
+        locale: 'dshpw',
+        inject: () => ({}),
+      },
+      ChatLauncher,
+    ),
+  );
+
+  // 不可见 token 上报器：会话作用域（conversation.composer.dock 供应 useProjection），
+  // 读取 dsh 的 tokenUsage 投影并把增量上报给密码门，用于子用户每小时 token 配额。
+  ctx.slots.inject('conversation.composer.dock', () =>
+    ctx.slots.register(
+      { name: 'conversation.composer.dock', id: 'dsh-passwords-token', order: 90 },
+      TokenReporter,
     ),
   );
 
