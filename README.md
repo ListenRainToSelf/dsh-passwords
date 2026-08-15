@@ -16,7 +16,7 @@ dsh 自带的网页界面没有任何登录功能。放上服务器/云主机后
 
 - 登录页 + 首次配置页（第一次访问先设主账号，之后谁访问都先过登录页）
 - 登录一次管 12 小时（Cookie 会话，关浏览器也不丢）
-- 支持 HTTPS + 80 端口自动跳转（公网部署强烈建议）
+- **自动 HTTPS**：装完自动向 Let's Encrypt 申请浏览器信任的证书，零配置、自动续期；80 端口自动跳转 443
 - 登录页自动跟着 dsh 的主题走（dsh 用深色它就深色）
 - 远程浏览器可正常使用 dsh 的全部设置功能（dsh 默认只允许本机浏览器编辑设置，dsh-passwords 自动处理这件事；dsh 升级后若设置页出现异常，设置页卡片里有"重载补丁"一键修复）
 
@@ -37,195 +37,96 @@ dsh 自带的网页界面没有任何登录功能。放上服务器/云主机后
 |---|---|
 | <img src="docs/screenshots/setup-page.png" width="380"> | <img src="docs/screenshots/dsh-ui.png" width="380"> |
 
-## 本地先跑起来看看
-
-需要 Node.js **22.5 以上**（`node -v` 看一眼）。
-
-```bash
-npm install           # 装依赖
-cp .env.example .env  # 复制出配置文件
-npm run build         # 编译
-npm start             # 启动，浏览器打开 http://localhost:8080
-```
-
-启动前记得改 `.env` 里的 `SETUP_KEY`（下面讲它是什么）。
-
-## SETUP_KEY 是什么？在哪？
-
-`SETUP_KEY` 是**安装密钥**。第一次打开网页时会进入"首次配置"页，要求输入它，输对了才能创建主用户。作用就是防止陌生人抢在你前面把平台初始化了。
-
-**它在项目根目录的 `.env` 文件里**，就是这一行：
-
-```ini
-SETUP_KEY=change-me-to-a-strong-random-key
-```
-
-操作很简单：
-
-1. 打开 `.env`，找到 `SETUP_KEY=` 这一行
-2. 把等号后面换成你自己生成的随机串：
-   ```bash
-   openssl rand -hex 24   # Linux/macOS 上跑，输出一串随机字符
-   ```
-3. 保存，重启网关
-4. 打开网页，在"预设密钥"框里输入刚才这串值
-
-⚠ 不改成随机值的话网关会拒绝启动。初始化完成后这个密钥就没用了，之后登录只认账号密码。
-
-## 部署到服务器（跟着抄就行）
-
-### 1. 装 Node.js 22+
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-node -v   # 确认 >= v22.5.0
-```
-
-### 2. 装 dsh 并准备 API key
-
-```bash
-npm install -g @deepseek-ai/dsh
-```
-
-去 DeepSeek 开放平台拿一个 API key（`sk-` 开头），等会要用。
-
-### 3. 下载本项目
-
-```bash
-cd /opt
-git clone https://github.com/slywalker2006/dsh-passwords.git
-cd dsh-passwords
-npm install
-cp .env.example .env
-```
-
-打开 `.env` 改三处：
-
-| 改哪里 | 改成什么 |
+| 认证代码 | 终端测试 |
 |---|---|
-| `SETUP_KEY=...` | 必须改，`openssl rand -hex 24` 生成 |
-| `MCP_GATEWAY_PORT=8080` | 想对公网开放的端口，比如 `80` |
-| `MCP_DB_ENC_KEY=` | 填上 `openssl rand -hex 32` 生成的值（数据加密密钥，**设了就不能改**） |
+| <img src="docs/screenshots/code-auth.png" width="380"> | <img src="docs/screenshots/terminal-test.png" width="380"> |
+
+## 快速开始
+
+### 0. 前置条件（三样）
+
+1. **Node.js 22.5+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
+2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh`，并已配置好你的模型 API key
+3. **git**：Linux 没装就 `apt-get install -y git`；Windows 去 git-scm.com 下载（pnpm 缺了脚本会自动装）
+
+### 1. 安装（按平台）
 
 ```bash
-npm run build
+# Linux / macOS —— 方式 A：直接下载安装
+curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+
+# Linux / macOS —— 方式 B：先 clone 再装
+git clone https://github.com/slywalker2006/dsh-passwords
+cd dsh-passwords
+bash install.sh
 ```
 
-### 3.5 把 dsh-passwords 注册成 dsh 插件（设置页卡片）
+**Windows**：下载仓库里的 `install.bat` 双击运行（或 clone 后运行）。它会自动把项目装到 `%USERPROFILE%\dsh-passwords` 并完成全部配置。Windows 上绑 80/443 **不需要管理员权限**；端口被占用时网关会以错误码 32 提示。
 
-dsh 的设置页插件列表由 profile 的依赖决定，把本项目加进去：
+脚本自动完成：装依赖 → 编译 → **生成随机 SETUP_KEY** → 注册为 dsh 插件 → 应用远程设置补丁。
+
+装完屏幕最后会显示**首次配置密钥（SETUP_KEY）**，同时也写进了安装目录的 `setup-key.txt`。**初始化完成后请删除该文件**——它只用于第一次初始化，删了不影响以后使用。
+
+### 2. 三步完成首次配置
+
+1. 用平时的方式启动 dsh（例如 `DEEPSEEK_API_KEY=sk-你的key dsh web`）——**密码门会被自动拉起，不需要任何额外启动命令**
+2. 浏览器直接打开 `https://<服务器IP>.sslip.io`——第一次访问会**自动进入「首次配置」页**，输入 SETUP_KEY，创建主用户（不用手动输入 `/gateway/setup`）
+3. 之后所有人访问 `https://<服务器IP>.sslip.io` 都会先过登录页
+
+别忘了在防火墙**和云服务商安全组**里放行 **80 和 443** 端口（开不了 80 的机器见下面的「部署场景矩阵」）。
+
+## 密码门跟着 dsh 走
+
+不需要 systemd，不需要手动启动网关进程，不需要给 dsh 加任何启动参数：
+
+```
+dsh 启动 → 插件被加载 → 插件自动拉起密码门（日志就在 dsh 控制台里）
+dsh 退出 → 密码门跟着停（不会留僵尸进程占端口）
+```
+
+- 高级用法：想单独托管网关进程？`node dist/cli.js serve-gateway` 手动跑，或自己配 systemd 也行。
+- 临时禁止自动拉起（调试用）：启动 dsh 时加环境变量 `DSH_PASSWORDS_NO_AUTOSTART=1`。
+
+## 自动 HTTPS（不用买证书、不用配置）
+
+- 默认自动探测服务器公网 IP，用 `<IP>.sslip.io` 域名向 Let's Encrypt 签发 90 天证书；到期前 30 天自动续期（新证书热加载，无需重启），全程零操作
+- 有自己域名：`.env` 加一行 `MCP_GATEWAY_DOMAIN=你的域名`，域名 A 记录指向服务器即可，证书自动改签域名版
+- **签发失败会拒绝启动**（带错误码），绝不会悄悄降级成明文 HTTP；续期失败但旧证书还在有效期内时，继续用旧证书并在后台自动重试
+
+| 错误码 | 含义 | 怎么办 |
+|---|---|---|
+| **30** | 证书签发失败 | 检查 80/443 是否放行（防火墙 + 云安全组都要开）、80 是否被占用、能否连通 Let's Encrypt |
+| **31** | 拿不到公网 IP/域名 | 服务器没有公网 IP，或探测失败。有域名就设 `MCP_GATEWAY_DOMAIN`；纯内网用走 HTTP 模式 |
+| **32** | 端口被占用 | 换端口（`.env` 的 `MCP_GATEWAY_PORT`）或释放被占端口 |
+
+> 为什么地址里有个 `.sslip.io`？浏览器要求证书上的名字和网址一致，而 Let's Encrypt 不给纯 IP 签发证书，`<IP>.sslip.io` 是免费借名服务。直接输裸 IP 的 `https://` 仍会提示主机名不匹配，属正常现象——从 80 端口入口进会自动跳到正确地址。
+
+## 部署场景矩阵（重点：80 端口）
+
+自动 HTTPS 的证书验证（Let's Encrypt http-01）要求 **LE 直连你服务器公网 IP 的 80 端口**——安全组、系统防火墙、NAT 转发一层都不能少。开不了 80 也不用慌，对号入座：
+
+| 场景 | 做法 | 用户看到的 | 需要放行 |
+|---|---|---|---|
+| ✅ 公网服务器，80/443 都能开 | 什么都不用做（默认） | HTTPS（自动证书） | 80 + 443 |
+| ✅ 有自己的域名证书 | `.env` 填 `MCP_GATEWAY_TLS_CERT/KEY`，端口随便改 | HTTPS（你的证书） | 只有你的网关端口，80 完全不用 |
+| ✅ 机器上已有 nginx/caddy 反代 | 反代在 80/443 用真实证书终结 TLS 并转发到密码门；`.env` 设 `MCP_GATEWAY_AUTO_TLS=0` + 高位端口，密码门只监听回环 | HTTPS（反代的证书） | 反代管 80/443，密码门零公网暴露 |
+| ✅ 域名挂在 Cloudflare | CF 边缘终结 TLS 转发到源站任意端口（配置同反代思路） | HTTPS（CF 证书） | 源站只对 CF 开放 |
+| ⚠ 无公网 IP / 纯内网 | `scripts/start-http.mjs` 或 `.env` 设 `AUTO_TLS=0` | HTTP 明文 | 任意端口 |
+| ⚠ 只有裸 IP 且 80 开不了 | 只能 HTTP（协议限制：http-01 固定走 80，裸 IP 又没有 DNS 可验证） | HTTP 明文 | 任意端口 |
+
+> 补充：http-01 验证只在**签发和续期**时访问 80 端口（每次几秒钟，约每 60 天一次）；`MCP_GATEWAY_REDIRECT_PORT` 默认就是 80，同时承担证书应答和 301 跳转两件事。
+
+## HTTP 模式（明文，能不用就不用）
+
+密码门默认**拒绝**以明文 HTTP 运行。确实只能内网用、且接受风险的话：
 
 ```bash
-cd ~/.dsh/profiles/web
-pnpm add /opt/dsh-passwords
+node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 ```
 
-（dsh rc.6 用 pnpm 管理 profile 依赖；如果系统里没有 pnpm，先 `npm install -g pnpm@9`。）
+脚本会先显示明文风险警告，输入 `y` 才启动。明文 HTTP 下密码与会话 Cookie 可能被网络中间人嗅探——公网部署请优先使用自动 HTTPS（默认模式，无需配置，只有证书实在签不出来时才用 HTTP 模式）。
 
-这样 dsh 启动时就会加载 dsh-passwords 的主机侧插件：设置页出现"dsh-passwords · 密码门"卡片，账号管理都在里面。
-
-### 4. 用 systemd 托管两个进程（重启服务器自动拉起）
-
-dsh 服务（`/etc/systemd/system/dsh-web.service`）：
-
-```ini
-[Unit]
-Description=DeepSeek Harness web
-After=network.target
-
-[Service]
-Type=simple
-Environment=DEEPSEEK_API_KEY=sk-你的key
-Environment=DSH_PASSWORDS_ENV_FILE=/opt/dsh-passwords/.env
-ExecStart=/usr/local/bin/dsh web --patch /opt/dsh-passwords/cordis.yml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> `DSH_PASSWORDS_ENV_FILE` 让 dsh 里的密码门插件读到和网关同一份 `.env`（同一个数据库、同一把密钥），必须加上。
-
-网关服务（`/etc/systemd/system/dsh-gateway.service`）：
-
-```ini
-[Unit]
-Description=dsh-passwords login gateway
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/dsh-passwords
-ExecStart=/usr/local/bin/node dist/cli.js serve-gateway
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now dsh-web dsh-gateway
-sudo systemctl status dsh-web dsh-gateway   # 两个都 active 就对了
-```
-
-### 5. 防火墙放行
-
-```bash
-sudo ufw allow 80/tcp
-```
-
-⚠ 云服务器（阿里云/腾讯云等）还要去**控制台的安全组**里放行同一个端口，只配 ufw 是没用的。
-
-### 6. 浏览器完成首次配置
-
-访问 `http://你的服务器IP` → 输 `.env` 里的 `SETUP_KEY` → 创建主用户。之后所有人访问都先过登录页。
-
-### 7. 强烈建议：开 HTTPS
-
-明文 HTTP 下密码会被中间人抓包。开 HTTPS 三步：
-
-```bash
-cd /opt/dsh-passwords
-
-# 1) 自签证书（用 EC 椭圆曲线，别用 RSA！RSA 握手在弱 CPU 服务器上可能要 1 秒以上，
-#    EC 只要几毫秒；IP 换成你的服务器 IP；有域名建议用 Let's Encrypt）
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout tls.key -out tls.crt \
-  -days 825 -nodes -subj "/CN=你的IP" -addext "subjectAltName=IP:你的IP"
-chmod 600 tls.key
-
-# 2) .env 里改成这样：
-#   MCP_GATEWAY_PORT=443
-#   MCP_GATEWAY_TLS_CERT=/opt/dsh-passwords/tls.crt
-#   MCP_GATEWAY_TLS_KEY=/opt/dsh-passwords/tls.key
-#   MCP_GATEWAY_REDIRECT_PORT=80
-
-# 3) 重启 + 放行 443
-sudo systemctl restart dsh-gateway
-sudo ufw allow 443/tcp   # 安全组同样要放行 443
-```
-
-之后 `http://` 会自动跳到 `https://`。自签证书浏览器第一次会提示不安全，点"继续前往"就行。
-
-## dsh 怎么启动（重要）
-
-dsh 和网关是**两个独立进程**，都要跑起来才能用。启动 dsh 的命令：
-
-```bash
-DEEPSEEK_API_KEY=sk-你的key dsh web --patch /opt/dsh-passwords/cordis.yml
-```
-
-两个参数说明：
-
-- `DEEPSEEK_API_KEY=...`：**必填**。dsh 调模型用的 API key。
-- `--patch .../cordis.yml`：**远程访问时强烈建议加**。不加的话，网页上点"添加工作区"会尝试弹出**你电脑本地**的系统文件夹选择器——但你是远程访问服务器的，浏览器根本弹不出本机选择器，表现就是点添加工作区没反应/报错（`pickDirectory` 失败）。加上这个参数后，点"添加工作区"会在网页内弹出**服务器目录浏览器**，直接浏览并选择服务器上的文件夹（也能手动输入绝对路径，比如 `/opt/myapp`）。
-
-不想每次敲参数：把 `cordis.yml` 的内容合并进 `~/.dsh/profiles/web/cordis.patch.yml`，之后直接 `dsh web` 就永久生效。
-
-> 上面第 4 步的 systemd 配置里已经带上了 `--patch`，跟着教程走就不用管这节。
+更彻底的做法：`.env` 里写 `MCP_GATEWAY_AUTO_TLS=0` 和 `MCP_GATEWAY_PORT=8080`，之后 dsh 启动时插件会直接以 HTTP 模式拉起密码门。
 
 ## 设置页里的密码门卡片
 
@@ -233,62 +134,74 @@ DEEPSEEK_API_KEY=sk-你的key dsh web --patch /opt/dsh-passwords/cordis.yml
 
 | 功能 | 谁可用 | 说明 |
 |---|---|---|
-| **远程设置 + 重载补丁** | 所有登录用户 | 显示远程设置是否可用；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
+| **远程设置 + 重载补丁** | 所有登录用户 | 远程设置已应用（强制启用）；dsh 升级后若设置页出现异常，点"重载补丁"一键修复（自动重启网页服务并刷新页面，不用 SSH） |
 | **修改密码** | 本人改自己；主用户可改任何人 | 改密后旧会话全部立即失效，需重新登录 |
 | **修改用户名** | 本人改自己；主用户可改任何人 | 改名后需用新用户名重新登录 |
 | **子用户管理** | 仅主用户 | 创建/删除子用户（子用户可用登录页进入，但没有管理权限） |
 
-说明：
-
 - **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
-- 卡片里的账号管理走网关自己的接口，与 dsh 的设置相互独立。
 - 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
 
-> dsh 默认只允许本机浏览器编辑设置。dsh-passwords 会自动处理，让经密码门登录的远程浏览器也能正常使用全部设置功能。dsh 升级后若设置页出现异常，点卡片里的"重载补丁"即可（网关每次启动也会自动处理，重启网关同样有效）。
+## 配置速查表（.env）
 
-## 配置速查表
-
-| 变量 | 默认值 | 干什么的 |
+| 变量 | 默认 | 说明 |
 |---|---|---|
-| `SETUP_KEY` | 必填 | 首次配置的安装密钥（在 `.env` 里） |
-| `MCP_DB_PATH` | `./data/platform.db` | 数据库文件放哪（自动建库，不需要装 MySQL） |
+| `SETUP_KEY` | 安装脚本自动生成 | 首次配置密钥；JWT 会话密钥也从它派生，**安装后别删** |
+| `MCP_DB_PATH` | `./data/platform.db` | 数据库文件（SQLite 自动建库，不需要 MySQL） |
 | `MCP_DB_ENC_KEY` | 空 | 数据加密密钥。`openssl rand -hex 32` 生成。**设了就不能换，换钥匙旧数据全废** |
 | `MCP_GATEWAY_HOST` | `0.0.0.0` | 网关监听地址 |
-| `MCP_GATEWAY_PORT` | `8080` | 网关端口 |
-| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页的地址（保持默认） |
-| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填就开 HTTPS |
-| `MCP_GATEWAY_REDIRECT_PORT` | 空 | 填 `80` 后 80 端口只做跳转 |
+| `MCP_GATEWAY_PORT` | `443` | 网关端口 |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh 网页地址（插件自动指向 dsh 实际端口，一般不用改） |
+| `MCP_GATEWAY_REDIRECT_PORT` | `80` | 80 端口：ACME 证书验证 + 301 跳转 443 |
+| `MCP_GATEWAY_DOMAIN` | 空 | 自己的域名；留空自动用 `<公网IP>.sslip.io` |
+| `MCP_GATEWAY_AUTO_TLS` | 开 | 留空=自动；`0` 关闭（明文 HTTP，危险） |
+| `MCP_GATEWAY_ACME_EMAIL` | 空 | 证书到期提醒邮箱（可选） |
+| `MCP_GATEWAY_ACME_STAGING` | 关 | `1`=用 LE 测试环境签发（调试用，浏览器不信任） |
+| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | 空 | 两个都填 = 用你自己的证书（优先于自动 HTTPS） |
 | `MCP_GATEWAY_PUBLIC_HOST` | 空 | 跳转固定用的公网 IP/域名（防 Host 伪造反射） |
-| `MCP_DSH_SETTINGS_FILE` | 自动找 `~/.dsh/settings.yaml` | 网关和 dsh 不在同一台机器时才要填 |
-| `DSH_PASSWORDS_ENV_FILE` | 空 | dsh 进程里读网关 `.env` 的路径（systemd 里配 `/opt/dsh-passwords/.env`） |
 | `MCP_DSH_ROOT` | 自动探测 | dsh 安装目录（`@deepseek-ai/dsh` 所在处），探测不到时手动指定 |
-| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；留空不自动重启 |
-| `MCP_INTERNAL_SECRET` | 由 SETUP_KEY 派生 | 网关内部接口密钥（dsh 插件→网关通知通道），一般不用改 |
+| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | 重载补丁后自动重启的 dsh systemd 服务名；显式留空不自动重启 |
+| `DSH_PASSWORDS_ENV_FILE` | 空 | 手动指定 `.env` 路径（插件自动传，一般不用填） |
 
 ## 常用命令
 
 ```bash
-npm start                              # 启动网关
-node dist/cli.js audit --limit 20    # 看最近 20 条审计日志（自动解密）
-node dist/cli.js serve-gateway --port 9000   # 换个端口启动
-node dist/cli.js patch status        # 看远程设置状态
-node dist/cli.js patch               # 重载补丁（重新应用 + 重启 dsh-web）
+node dist/cli.js audit --limit 20        # 看最近 20 条审计日志（自动解密）
+node dist/cli.js patch status            # 看远程设置补丁状态
+node dist/cli.js patch                   # 重载补丁（重新应用 + 重启 dsh-web）
+node dist/cli.js serve-gateway --port 9000   # 手动启动网关并换端口
+node scripts/start-http.mjs 8080         # 明文 HTTP 模式（危险，y/N 确认）
 ```
 
 ## 常见问题
 
 - **登录页一直显示"首次配置"？** 说明用户表是空的（新库或数据库被清过）。按页面提示输入 `SETUP_KEY` 重新创建主用户即可。
 - **忘记主用户密码？** 停服后跑 `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`，重启后重新走首次配置。
+- **dsh 控制台报错误码 30 / 31，密码门没起来？** 见上面「自动 HTTPS」的错误码表。修好后重启 dsh 会自动再拉起。
+- **443 端口绑定失败（非 root 用户）？** Linux 上 1024 以下端口需要 root：用 root/sudo 启动 dsh，或把 `MCP_GATEWAY_PORT` 改成高位端口（如 8443）并自行做端口转发。
+- **dsh 启动报 `duplicate loader entry id`？** 你在 profile 里用过 `dsh plugin add`。它会把 profile 里**所有**声明 `dsh.bundle` 的依赖全部加进 bundles 层，与已装的其它插件重复时 dsh 直接启动失败。卸载 dsh-passwords 后改用 `node scripts/register-plugin.mjs` 精确注册（只追加本插件一个条目）。
+- **npm 装 dsh 报 allow-scripts / node-pty 错？** npm 新版会拦截安装脚本，先放行再重装：`npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user`，然后重新 `npm install -g @deepseek-ai/dsh`（本项目自身没这个问题，是 dsh 的依赖要跑原生构建）。
 - **dsh 报 `crypto.randomUUID is not a function`？** 旧版网关没有 HTML 注入兼容层，更新代码后**强刷浏览器**（Ctrl+Shift+R）。
 - **数据库文件被偷了要紧吗？** 不要紧。敏感字段全是密文或散列，没有 `.env` 里的密钥解不开；密码本身只有 bcrypt 哈希，本来就没有明文。
 - **想换 `MCP_DB_ENC_KEY`？** 不行。这个密钥一旦启用就不能换，换了一切历史数据都解不开。备份数据库时必须连 `.env` 一起备份。
-- **访问有点慢？** 网关本身每次请求只花约 1-2ms。先查 TLS 握手：`curl -sk -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的IP/gateway/login`——如果 TLS 那项要几百毫秒以上，多半是用了 RSA 证书（弱 CPU 服务器上 RSA 握手签名非常慢），换成 EC 证书即可（见第 7 步命令）。TCP 快、TLS 也快但还是慢的话，就是你的网络/代理到服务器的链路延迟，代码解决不了。
-- **每次进去都卡在 "Loading plugins…"？** 这是 dsh 在加载它的 ~30 个插件脚本，而 dsh 对插件/静态资源返回的是 `no-cache`，浏览器每次都要全部重新下载。v2.0.4 起网关对 `/assets/*` 和带 `rev=` 的 `/plugins/*` 强制一年期 immutable 缓存（文件名/rev 都是内容哈希，dsh 更新会自动换新地址）。升级后**第一次访问仍会完整下载一次，之后刷新秒进**；如果升级后还慢，强刷一次浏览器（Ctrl+Shift+R）让新响应头生效。
-- **npm 装 dsh 报错（allow-scripts / node-pty）？** 跑 `npm config set allow-scripts=... --location=user` 并装 `sudo apt install build-essential`（本项目自己没这个问题，是 dsh 的依赖要编译）。
+- **每次进去都卡在 "Loading plugins…"？** 这是 dsh 在加载它的 ~30 个插件脚本，而 dsh 对插件/静态资源返回的是 `no-cache`，浏览器每次都要全部重新下载。网关已对 `/assets/*` 和带 `rev=` 的 `/plugins/*` 强制一年期 immutable 缓存（文件名/rev 都是内容哈希，dsh 更新会自动换新地址）。升级后**第一次访问仍会完整下载一次，之后刷新秒进**；如果还慢，强刷一次浏览器（Ctrl+Shift+R）让新响应头生效。
+- **访问有点慢？** 密码门每次请求只花约 1-2ms。先查 TLS 握手：`curl -s -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://你的地址/gateway/login`——TLS 那项正常是几十毫秒。TCP 快、TLS 也快但还是慢的话，就是你的网络到服务器的链路延迟，代码解决不了。
+
+## 手动安装（想自己一步步来）
+
+> Windows 用户建议直接用 `install.bat`；本节以 Linux 为例，步骤等价。
+
+1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
+2. `npm install && npm run build`
+3. `cp .env.example .env`，把 `SETUP_KEY` 改成随机串（`openssl rand -hex 24`）
+4. 注册插件：`node scripts/register-plugin.mjs`（等价于把 `link:$(pwd)` 加进 `~/.dsh/profiles/web/package.json` 的 dependencies 和 `dsh.profile.bundles` 再 pnpm install。**不要用 `dsh plugin add`**，原因见常见问题）
+5. 应用补丁：`node dist/cli.js patch`（找不到 dsh 目录就用 `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh` 指定）
+
+之后同样：启动 dsh → 密码门自动拉起 → 打开 `https://<你的地址>` 完成首次配置。
 
 ## 安全与隐私
 
-账号密码只存 bcrypt 哈希；用户名、IP、审计记录加密落盘；连续输错密码 5 次锁 15 分钟。所有密钥都在你自己的 `.env` 和数据库里，源码公开不影响安全。
+账号密码只存 bcrypt 哈希；用户名、IP、审计记录加密落盘；连续输错密码 5 次锁 15 分钟；登录/失败全程审计。证书签发失败拒绝启动（不降级明文）。所有密钥都在你自己的 `.env` 和数据库里，源码公开不影响安全。
 
 ## 语言
 

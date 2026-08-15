@@ -1,5 +1,7 @@
 # dsh-passwords
 
+[简体中文](README.md) | English
+
 A **password gate** for DeepSeek Harness (dsh): safe **remote access** plus **multi-user** accounts.
 
 dsh's built-in web UI has no login at all. Put it on a server or cloud host and anyone with the address can use it — and burn your API key. dsh-passwords puts a login page in front of dsh: everyone sees the login page first, and only correct credentials get through.
@@ -14,7 +16,7 @@ dsh's built-in web UI has no login at all. Put it on a server or cloud host and 
 
 - Login page + first-time setup page (on first visit you create the owner account; afterwards everyone goes through the login page)
 - One login lasts 12 hours (cookie session, survives browser restarts)
-- HTTPS support with automatic 80-port redirect (strongly recommended for public deployments)
+- **Automatic HTTPS**: a browser-trusted Let's Encrypt certificate is issued automatically at install — zero config, auto-renewing; port 80 redirects to 443
 - The login page follows dsh's theme automatically (dark when dsh is dark)
 - Remote browsers can use every dsh settings feature (dsh by default only lets local browsers edit settings; dsh-passwords handles this automatically — and if the settings page breaks after a dsh upgrade, the in-settings card has a one-click "Reload patch" fix)
 
@@ -35,270 +37,182 @@ dsh's built-in web UI has no login at all. Put it on a server or cloud host and 
 |---|---|
 | <img src="docs/screenshots/setup-page.png" width="380"> | <img src="docs/screenshots/dsh-ui.png" width="380"> |
 
-## Try it locally first
-
-Requires Node.js **22.5 or newer** (`node -v` to check).
-
-```bash
-npm install           # install dependencies
-cp .env.example .env  # copy the config template
-npm run build         # build
-npm start             # start, then open http://localhost:8080
-```
-
-Change `SETUP_KEY` in `.env` before starting (explained below).
-
-## What is SETUP_KEY, and where is it?
-
-`SETUP_KEY` is the **setup key**. The first time the web page opens it shows the "First-time setup" page and asks for this key — only after entering it correctly can you create the owner account. Its job is to stop a stranger from initializing your platform before you do.
-
-**It lives in the `.env` file at the project root**, on this line:
-
-```ini
-SETUP_KEY=change-me-to-a-strong-random-key
-```
-
-Steps:
-
-1. Open `.env` and find the `SETUP_KEY=` line
-2. Replace the value with your own random string:
-   ```bash
-   openssl rand -hex 24   # run on Linux/macOS, prints a random string
-   ```
-3. Save it and restart the gateway
-4. Open the web page and paste that string into the "Setup key" field
-
-⚠ If you don't change it to a random value the gateway refuses to start. After initialization the key is no longer used — login only accepts username + password from then on.
-
-## Deploying to a server (copy-paste guide)
-
-### 1. Install Node.js 22+
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-node -v   # confirm >= v22.5.0
-```
-
-### 2. Install dsh and prepare an API key
-
-```bash
-npm install -g @deepseek-ai/dsh
-```
-
-Get an API key from the DeepSeek platform (starts with `sk-`); you'll need it shortly.
-
-### 3. Download this project
-
-```bash
-cd /opt
-git clone https://github.com/slywalker2006/dsh-passwords.git
-cd dsh-passwords
-npm install
-cp .env.example .env
-```
-
-Open `.env` and change three things:
-
-| What | Change to |
+| Auth code | Terminal tests |
 |---|---|
-| `SETUP_KEY=...` | required — generate with `openssl rand -hex 24` |
-| `MCP_GATEWAY_PORT=8080` | the port you want to expose publicly, e.g. `80` |
-| `MCP_DB_ENC_KEY=` | fill in a value from `openssl rand -hex 32` (data-encryption key; **once set it can't be changed**) |
+| <img src="docs/screenshots/code-auth.png" width="380"> | <img src="docs/screenshots/terminal-test.png" width="380"> |
+
+## Quick start
+
+### 0. Prerequisites (three things)
+
+1. **Node.js 22.5+**: check with `node -v` (Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`; Windows: download from nodejs.org)
+2. **dsh installed**: `npm install -g @deepseek-ai/dsh`, with your model API key configured
+3. **git**: Linux: `apt-get install -y git`; Windows: download from git-scm.com (pnpm is auto-installed by the script when missing)
+
+### 1. Install (by platform)
 
 ```bash
-npm run build
+# Linux / macOS — Option A: download and install directly
+curl -fsSL https://raw.githubusercontent.com/slywalker2006/dsh-passwords/main/install.sh | bash
+
+# Linux / macOS — Option B: clone first, then install
+git clone https://github.com/slywalker2006/dsh-passwords
+cd dsh-passwords
+bash install.sh
 ```
 
-### 3.5 Register dsh-passwords as a dsh plugin (the settings card)
+**Windows**: download `install.bat` from the repo and double-click it (or run it after cloning). It installs the project into `%USERPROFILE%\dsh-passwords` and completes all configuration. Binding ports 80/443 needs **no admin rights** on Windows; if a port is occupied, the gate exits with error code 32.
 
-dsh's settings-page plugin list is driven by the profile's dependencies; add this project:
+The script handles everything: install dependencies → build → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
+
+At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **Delete that file after your first-time setup** — it is only needed once.
+
+### 2. Finish setup in three steps
+
+1. Start dsh the way you normally do (e.g. `DEEPSEEK_API_KEY=sk-yourkey dsh web`) — **the password gate starts automatically, no extra commands**
+2. Open `https://<server-IP>.sslip.io` in a browser — on the first visit it **automatically shows the first-time setup page**; enter the SETUP_KEY and create the owner account (no need to type `/gateway/setup` manually)
+3. From now on, everyone visiting `https://<server-IP>.sslip.io` must pass the login page first
+
+Remember to open ports **80 and 443** in both the server firewall **and** your cloud provider's security group (can't open port 80? See the deployment matrix below).
+
+## The gate follows dsh
+
+No systemd unit, no manual gateway process, no extra flags for dsh:
+
+```
+dsh starts → plugin loads → plugin spawns the password gate (logs appear in dsh's console)
+dsh exits  → the gate stops with it (no orphan process holding ports)
+```
+
+- Advanced: to run the gateway standalone, use `node dist/cli.js serve-gateway` or set up your own systemd unit.
+- Temporarily disable the auto-start (debugging): start dsh with `DSH_PASSWORDS_NO_AUTOSTART=1`.
+
+## Automatic HTTPS (no certs to buy, nothing to configure)
+
+- By default the server's public IP is detected and a 90-day Let's Encrypt certificate is issued for `<IP>.sslip.io`; it renews automatically 30 days before expiry (hot-loaded, no restart) — zero ongoing effort
+- Own a domain? Add `MCP_GATEWAY_DOMAIN=your.domain` to `.env` and point an A record at the server; the certificate is re-issued for your domain
+- **If issuance fails the gate refuses to start** (with an error code) — it never silently downgrades to plaintext HTTP. If a renewal fails while the old certificate is still valid, it keeps serving it and retries in the background.
+
+| Error code | Meaning | What to do |
+|---|---|---|
+| **30** | Certificate issuance failed | Check 80/443 are open (firewall + cloud security group), 80 isn't occupied, and Let's Encrypt is reachable |
+| **31** | No public IP/domain detected | The server has no public IP or detection failed. Set `MCP_GATEWAY_DOMAIN` if you have a domain; use HTTP mode for LAN-only setups |
+| **32** | Port already in use | Change `MCP_GATEWAY_PORT` in `.env` or free the port |
+
+> Why the `.sslip.io` in the URL? Browsers require the certificate name to match the URL, and Let's Encrypt does not issue certificates for bare IPs — `<IP>.sslip.io` is a free name-borrowing service. Opening the bare IP over `https://` directly will still warn about a hostname mismatch; that's expected. Entering via port 80 redirects to the correct address automatically.
+
+## Deployment matrix (all about port 80)
+
+Automatic HTTPS uses Let's Encrypt's http-01 validation, which requires **LE to connect directly to port 80 of your server's public IP** — the security group, the OS firewall and any NAT forwarding must all allow it. Can't open port 80? Pick your scenario:
+
+| Scenario | What to do | What users see | Ports to open |
+|---|---|---|---|
+| ✅ Public server, can open 80/443 | Nothing — the default | HTTPS (auto certificate) | 80 + 443 |
+| ✅ You already have a domain certificate | Set `MCP_GATEWAY_TLS_CERT/KEY` in `.env` (any port) | HTTPS (your certificate) | Only your gateway port — 80 not needed at all |
+| ✅ nginx/caddy reverse proxy already on the machine | The proxy terminates TLS on 80/443 with a real certificate and forwards to the gate; set `MCP_GATEWAY_AUTO_TLS=0` + a high port in `.env`, gate listens on loopback only | HTTPS (the proxy's certificate) | The proxy owns 80/443; the gate has zero public exposure |
+| ✅ Domain on Cloudflare | Cloudflare terminates TLS at the edge and forwards to any origin port (same `.env` settings as the reverse-proxy case) | HTTPS (Cloudflare's certificate) | Origin open to Cloudflare only |
+| ⚠ No public IP / LAN only | `scripts/start-http.mjs` or `AUTO_TLS=0` in `.env` | Plain HTTP | Any port |
+| ⚠ Bare IP only, port 80 blocked | HTTP is the only option (protocol limit: http-01 always uses port 80, and a bare IP has no DNS to validate) | Plain HTTP | Any port |
+
+> Note: http-01 only touches port 80 during issuance and renewal (a few seconds, roughly every 60 days). `MCP_GATEWAY_REDIRECT_PORT` defaults to 80 — it handles both the challenge answers and the 301 redirect.
+
+## HTTP mode (plaintext — avoid when possible)
+
+The gate **refuses** to run in plaintext HTTP by default. If you really must (LAN-only, and you accept the risk):
 
 ```bash
-cd ~/.dsh/profiles/web
-pnpm add /opt/dsh-passwords
+node scripts/start-http.mjs [port]    # default 8080, asks for y/N confirmation
 ```
 
-(dsh rc.6 manages profile dependencies with pnpm; if pnpm is missing, run `npm install -g pnpm@9` first.)
+The script prints a plaintext-risk warning first and only starts after you type `y`. Over plain HTTP, passwords and session cookies can be sniffed on the network — for public deployments prefer automatic HTTPS (the default mode; use HTTP mode only when a certificate truly cannot be issued).
 
-Now dsh loads the dsh-passwords host plugin at startup: a "dsh-passwords · Password Gate" card appears on the settings page with all account management inside.
+For a permanent setup: put `MCP_GATEWAY_AUTO_TLS=0` and `MCP_GATEWAY_PORT=8080` in `.env`; the plugin will then start the gate in HTTP mode whenever dsh starts.
 
-### 4. Run both processes under systemd (auto-start on reboot)
+## The gate card in dsh settings
 
-The dsh service (`/etc/systemd/system/dsh-web.service`):
-
-```ini
-[Unit]
-Description=DeepSeek Harness web
-After=network.target
-
-[Service]
-Type=simple
-Environment=DEEPSEEK_API_KEY=sk-your-key
-Environment=DSH_PASSWORDS_ENV_FILE=/opt/dsh-passwords/.env
-ExecStart=/usr/local/bin/dsh web --patch /opt/dsh-passwords/cordis.yml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> `DSH_PASSWORDS_ENV_FILE` makes the in-dsh plugin read the same `.env` as the gateway (same database, same keys) — it must be set.
-
-The gateway service (`/etc/systemd/system/dsh-gateway.service`):
-
-```ini
-[Unit]
-Description=dsh-passwords login gateway
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/dsh-passwords
-ExecStart=/usr/local/bin/node dist/cli.js serve-gateway
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now dsh-web dsh-gateway
-sudo systemctl status dsh-web dsh-gateway   # both should be active
-```
-
-### 5. Open the firewall
-
-```bash
-sudo ufw allow 80/tcp
-```
-
-⚠ On cloud servers (Aliyun/Tencent Cloud etc.) you must also open the same port in the **console security group** — configuring ufw alone does nothing.
-
-### 6. Finish first-time setup in the browser
-
-Visit `http://your-server-ip` → enter the `SETUP_KEY` from `.env` → create the owner account. From now on everyone goes through the login page.
-
-### 7. Strongly recommended: enable HTTPS
-
-Over plain HTTP, passwords can be sniffed by a man-in-the-middle. Three steps to HTTPS:
-
-```bash
-cd /opt/dsh-passwords
-
-# 1) Self-signed certificate (use EC elliptic curves, NOT RSA! RSA handshakes can
-#    take over a second on weak-CPU servers while EC takes milliseconds;
-#    replace with your server IP; use Let's Encrypt if you have a domain)
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout tls.key -out tls.crt \
-  -days 825 -nodes -subj "/CN=your-ip" -addext "subjectAltName=IP:your-ip"
-chmod 600 tls.key
-
-# 2) In .env, change to:
-#   MCP_GATEWAY_PORT=443
-#   MCP_GATEWAY_TLS_CERT=/opt/dsh-passwords/tls.crt
-#   MCP_GATEWAY_TLS_KEY=/opt/dsh-passwords/tls.key
-#   MCP_GATEWAY_REDIRECT_PORT=80
-
-# 3) Restart and open 443
-sudo systemctl restart dsh-gateway
-sudo ufw allow 443/tcp   # open 443 in the security group too
-```
-
-Afterwards `http://` automatically redirects to `https://`. With a self-signed certificate the browser warns once — click "continue" and you're in.
-
-## How dsh must be started (important)
-
-dsh and the gateway are **two separate processes** — both must run. The dsh start command:
-
-```bash
-DEEPSEEK_API_KEY=sk-your-key dsh web --patch /opt/dsh-passwords/cordis.yml
-```
-
-What the two arguments do:
-
-- `DEEPSEEK_API_KEY=...`: **required**. The API key dsh uses for the model.
-- `--patch .../cordis.yml`: **strongly recommended for remote access**. Without it, clicking "Add workspace" in the web UI tries to open the **local machine's** system folder picker — but you're accessing the server remotely, so the browser can't pop up a local picker, and the click appears dead or errors (`pickDirectory` failure). With this argument, "Add workspace" opens an **in-page server directory browser** instead — browse and pick folders directly on the server (or type an absolute path like `/opt/myapp`).
-
-To avoid typing the arguments every time: merge the contents of `cordis.yml` into `~/.dsh/profiles/web/cordis.patch.yml`, then plain `dsh web` works permanently.
-
-> The systemd config in step 4 already includes `--patch`, so if you followed the guide you can skip this section.
-
-## The password-gate card on the settings page
-
-After signing in to dsh, open **Settings → Plugins** and you'll see the "dsh-passwords · Password Gate" card. Inside:
+After logging in to dsh, open **Settings → Plugins** to find the "dsh-passwords · Password gate" card:
 
 | Feature | Who can use it | Notes |
 |---|---|---|
-| **Remote settings + reload patch** | every signed-in user | Shows whether remote settings work; if the settings page breaks after a dsh upgrade, click "Reload patch" for a one-click fix (restarts the web service and refreshes the page — no SSH) |
-| **Change password** | yourself; the owner can change anyone's | changing a password immediately invalidates old sessions — sign in again |
-| **Change username** | yourself; the owner can change anyone's | after renaming, sign in with the new username |
-| **Subuser management** | owner only | create/delete subusers (subusers can sign in through the login page but have no management permissions) |
-
-Notes:
+| **Remote settings + reload patch** | All signed-in users | Remote settings are applied (always on); after a dsh upgrade, click "Reload patch" to fix the settings page in one click (restarts the web service and refreshes the page — no SSH) |
+| **Change password** | Yourself; the owner can change anyone's | Old sessions are invalidated immediately |
+| **Change username** | Yourself; the owner can change anyone's | Sign in with the new username afterwards |
+| **Subuser management** | Owner only | Create/delete subusers (subusers can sign in but have no admin rights) |
 
 - **Owner** = the account created at first-time setup; everything added later is a **subuser**.
-- Account management in the card goes through the gateway's own API, independent of dsh's settings.
-- Password requirements match the login page: at least 12 characters including uppercase, lowercase, digits and symbols.
+- Passwords follow the same rule as the login page: at least 12 characters with uppercase, lowercase, digits and symbols.
 
-> dsh by default only allows local browsers to edit settings. dsh-passwords handles this automatically so remote browsers signed in through the password gate can use every settings feature. If the settings page breaks after a dsh upgrade, click "Reload patch" in the card (the gateway also re-applies the patch automatically on every gateway start — restarting the gateway works too).
+## Configuration reference (.env)
 
-## Configuration reference
-
-| Variable | Default | What it does |
+| Variable | Default | Purpose |
 |---|---|---|
-| `SETUP_KEY` | required | setup key for first-time configuration (in `.env`) |
-| `MCP_DB_PATH` | `./data/platform.db` | where the database file lives (auto-created, no MySQL needed) |
-| `MCP_DB_ENC_KEY` | empty | data-encryption key. Generate with `openssl rand -hex 32`. **Once set it can't be changed — changing it makes all old data unreadable** |
-| `MCP_GATEWAY_HOST` | `0.0.0.0` | gateway listen address |
-| `MCP_GATEWAY_PORT` | `8080` | gateway port |
-| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (leave as default) |
-| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | empty | fill both to enable HTTPS |
-| `MCP_GATEWAY_REDIRECT_PORT` | empty | set `80` to make port 80 redirect-only |
-| `MCP_GATEWAY_PUBLIC_HOST` | empty | fixed public IP/domain for redirects (prevents Host-header reflection) |
-| `MCP_DSH_SETTINGS_FILE` | auto-detected `~/.dsh/settings.yaml` | only needed when the gateway and dsh run on different machines |
-| `DSH_PASSWORDS_ENV_FILE` | empty | path for the dsh process to read the gateway's `.env` (systemd: `/opt/dsh-passwords/.env`) |
+| `SETUP_KEY` | auto-generated by the installer | First-time setup key; the JWT session key is derived from it — **keep it after install** |
+| `MCP_DB_PATH` | `./data/platform.db` | Database file (SQLite, created automatically — no MySQL needed) |
+| `MCP_DB_ENC_KEY` | empty | Data-at-rest encryption key. Generate with `openssl rand -hex 32`. **Once set it must never change**, or old data becomes unreadable |
+| `MCP_GATEWAY_HOST` | `0.0.0.0` | Gateway listen address |
+| `MCP_GATEWAY_PORT` | `443` | Gateway port |
+| `MCP_GATEWAY_UPSTREAM` | `http://127.0.0.1:3080` | dsh web address (the plugin points it at dsh's actual port automatically — usually leave as-is) |
+| `MCP_GATEWAY_REDIRECT_PORT` | `80` | Port 80: ACME challenge answers + 301 redirect to 443 |
+| `MCP_GATEWAY_DOMAIN` | empty | Your own domain; when empty, `<public-IP>.sslip.io` is used |
+| `MCP_GATEWAY_AUTO_TLS` | on | Empty = auto; `0` disables it (plaintext HTTP, dangerous) |
+| `MCP_GATEWAY_ACME_EMAIL` | empty | Optional email for expiry notifications |
+| `MCP_GATEWAY_ACME_STAGING` | off | `1` = issue from the LE staging environment (for testing; browsers won't trust it) |
+| `MCP_GATEWAY_TLS_CERT` / `MCP_GATEWAY_TLS_KEY` | empty | When both are set, your own certificate is used (takes priority over auto HTTPS) |
+| `MCP_GATEWAY_PUBLIC_HOST` | empty | Public IP/domain used for redirects (prevents Host-header reflection) |
 | `MCP_DSH_ROOT` | auto-detected | dsh install directory (where `@deepseek-ai/dsh` lives); set manually if detection fails |
-| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | the dsh systemd service restarted after a patch reload; empty = no auto-restart |
-| `MCP_INTERNAL_SECRET` | derived from SETUP_KEY | gateway internal-API secret (the dsh plugin → gateway notify channel); normally leave as is |
+| `MCP_DSH_RESTART_SERVICE` | `dsh-web` | systemd service to restart after a patch reload; an explicit empty value disables auto-restart |
+| `DSH_PASSWORDS_ENV_FILE` | empty | Explicit path to `.env` (the plugin passes it automatically — usually not needed) |
 
 ## Common commands
 
 ```bash
-npm start                              # start the gateway
-node dist/cli.js audit --limit 20    # last 20 audit-log entries (auto-decrypted)
-node dist/cli.js serve-gateway --port 9000   # start on a different port
-node dist/cli.js patch status        # show remote-settings patch status
-node dist/cli.js patch               # reload the patch (re-apply + restart dsh-web)
+node dist/cli.js audit --limit 20             # last 20 audit-log entries (auto-decrypted)
+node dist/cli.js patch status                 # remote-settings patch status
+node dist/cli.js patch                        # reload the patch (re-applies + restarts dsh-web)
+node dist/cli.js serve-gateway --port 9000    # run the gateway manually on another port
+node scripts/start-http.mjs 8080              # plaintext HTTP mode (dangerous, y/N confirmation)
 ```
 
 ## FAQ
 
-- **The login page keeps showing "First-time setup"?** The user table is empty (fresh database, or it was wiped). Enter the `SETUP_KEY` per the page prompt and create the owner account again.
-- **Forgot the owner password?** Stop the service, run `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`, restart and go through first-time setup again.
-- **dsh reports `crypto.randomUUID is not a function`?** Old gateway builds didn't have the HTML-injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
-- **Is it a problem if the database file gets stolen?** No. Sensitive fields are ciphertext or hashes; without the keys in `.env` they can't be decrypted. Passwords are bcrypt hashes only — there was never any plaintext.
-- **Want to change `MCP_DB_ENC_KEY`?** You can't. Once enabled, this key can't be changed — a new key makes all historical data unreadable. When backing up the database, back up `.env` together with it.
-- **Access feels slow?** The gateway itself only spends ~1-2ms per request. Check the TLS handshake first: `curl -sk -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://your-ip/gateway/login` — if the TLS number is hundreds of ms, you're probably using an RSA certificate (RSA handshake signing is very slow on weak-CPU servers); switch to an EC certificate (see step 7). If TCP and TLS are both fast but it's still slow, it's your network/proxy path to the server — code can't fix that.
-- **Stuck on "Loading plugins…" every time?** That's dsh loading its ~30 plugin scripts — dsh returns `no-cache` for plugin/static assets, so the browser re-downloads everything every visit. Since v2.0.4 the gateway forces one-year immutable caching on `/assets/*` and `/plugins/*` URLs with `rev=` (filenames/rev are content hashes, so dsh updates get new URLs automatically). After upgrading, the **first** visit still downloads everything once; later refreshes are instant. If it's still slow after an upgrade, hard-refresh once (Ctrl+Shift+R) so the new response headers take effect.
-- **npm fails installing dsh (allow-scripts / node-pty)?** Run `npm config set allow-scripts=... --location=user` and install `sudo apt install build-essential` (this project itself has no such issue — it's dsh's dependencies that need compiling).
+- **The login page keeps showing "First-time setup"?** The user table is empty (fresh or wiped database). Enter the `SETUP_KEY` as prompted to create the owner account again.
+- **Forgot the owner password?** Stop the service and run `node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/platform.db');db.exec('DELETE FROM users;')"`, then restart and redo first-time setup.
+- **dsh's console shows error code 30 / 31 and the gate didn't start?** See the error-code table under "Automatic HTTPS" above. After fixing, restarting dsh pulls the gate up again.
+- **Port 443 fails to bind (non-root user)?** On Linux, ports below 1024 need root: start dsh as root/sudo, or set `MCP_GATEWAY_PORT` to a high port (e.g. 8443) and forward traffic yourself.
+- **dsh fails to start with `duplicate loader entry id`?** You used `dsh plugin add` in the profile. It reconciles ALL dependencies declaring `dsh.bundle` into the bundles layer, which crashes dsh when they overlap with already-installed plugins. Uninstall dsh-passwords and register precisely with `node scripts/register-plugin.mjs` (it appends only this plugin).
+- **npm fails installing dsh (allow-scripts / node-pty)?** Newer npm blocks install scripts. Allow them first, then reinstall: `npm config set allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` followed by `npm install -g @deepseek-ai/dsh` again (this project itself has no such issue — it's dsh's dependencies that run native builds).
+- **dsh reports `crypto.randomUUID is not a function`?** An older gateway build lacks the HTML injection compat layer — update the code and **hard-refresh the browser** (Ctrl+Shift+R).
+- **Is it a problem if the database file is stolen?** No. Sensitive fields are encrypted or hashed; without the keys in `.env` they can't be read, and passwords only exist as bcrypt hashes anyway.
+- **Can I change `MCP_DB_ENC_KEY` later?** No. Once enabled it must never change, or all historical data becomes unreadable. Back up `.env` together with the database.
+- **Stuck on "Loading plugins…" every time?** dsh loads ~30 plugin scripts and answers `no-cache` for them, so the browser re-downloads everything each visit. The gateway forces one-year immutable caching for `/assets/*` and rev-hashed `/plugins/*` (URLs change whenever dsh updates). After an upgrade the first visit still downloads everything once, then refreshes are instant; if it's still slow, hard-refresh once so the new headers apply.
+- **Access feels slow?** The gate itself adds only ~1-2ms per request. Check the TLS handshake first: `curl -s -o /dev/null -w "TCP:%{time_connect}s TLS:%{time_appconnect}s\n" https://your-host/gateway/login` — TLS should be tens of milliseconds. If both TCP and TLS are fast, the latency is your network path to the server, which no code can fix.
+
+## Manual install (step by step)
+
+> Windows users: use `install.bat` instead. This section uses Linux as the example; the steps are equivalent.
+
+1. `git clone https://github.com/slywalker2006/dsh-passwords && cd dsh-passwords`
+2. `npm install && npm run build`
+3. `cp .env.example .env`, replace `SETUP_KEY` with a random string (`openssl rand -hex 24`)
+4. Register the plugin: `node scripts/register-plugin.mjs` (equivalent to adding `link:$(pwd)` to the dependencies and `dsh.profile.bundles` of `~/.dsh/profiles/web/package.json`, then `pnpm install`. **Don't use `dsh plugin add`** — see the FAQ)
+5. Apply the patch: `node dist/cli.js patch` (if the dsh directory isn't found, set `MCP_DSH_ROOT=/path/to/@deepseek-ai/dsh`)
+
+Then as usual: start dsh → the gate starts automatically → open `https://<your-host>` to finish first-time setup.
 
 ## Security & privacy
 
-Account passwords are stored as bcrypt hashes only; usernames, IPs and audit records are encrypted at rest; 5 consecutive wrong passwords lock the account for 15 minutes. All keys live in your own `.env` and database — the source being public does not affect security.
+Passwords are stored only as bcrypt hashes; usernames, IPs and audit records are encrypted at rest; 5 consecutive failures lock the account for 15 minutes; every login and failure is audited. Certificate-issuance failure stops the service instead of downgrading to plaintext. All keys live in your own `.env` and database — open source code does not weaken security.
 
 ## Language
 
-The UI is bilingual (简体中文 / English) and follows dsh's language setting:
+The UI is bilingual (Chinese/English) and follows dsh's language setting:
 
-- **Login / setup pages**: follow dsh's language (Settings → General → Language), falling back to the browser language; a 中文/English switch in the top-right corner of the page overrides it.
-- **Settings-page card**: follows dsh's language setting and updates immediately when you switch it.
-- **CLI**: follows the `LANG` / `LC_ALL` environment variable (`en` prefix = English).
+- **Login / setup pages**: follow dsh's language (Settings → General → Language), then the browser language; a 中文/English toggle at the top-right persists your choice.
+- **Settings card**: follows dsh's language setting, switches instantly.
+- **CLI**: follows the `LANG` / `LC_ALL` environment variables (`en` prefix = English).
 
 ## License
 
 [BSD 3-Clause](./LICENSE) © 2026 slywalker2006 — free to use, modify and distribute; keep the copyright notice.
 
-This project is an independent dsh extension and is not affiliated with DeepSeek. dsh itself is licensed under its own license (MIT).
+This project is an independent extension for dsh and is not affiliated with DeepSeek. dsh itself is licensed under its own terms (MIT).
