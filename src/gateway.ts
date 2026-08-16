@@ -1100,8 +1100,8 @@ export function createGatewayServer(
                 respHeaders['content-encoding'] = 'gzip';
               }
               respHeaders['content-length'] = String(out.length);
-              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              res.end(out);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
             } catch {
               res.destroy();
             }
@@ -1134,12 +1134,12 @@ export function createGatewayServer(
               delete respHeaders['content-length'];
               delete respHeaders['content-encoding'];
               respHeaders['content-length'] = String(out.length);
-              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              res.end(out);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
             } catch {
               const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              res.end(Buffer.concat(chunks));
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(Buffer.concat(chunks));
             }
           });
           upstreamRes.on('error', () => res.destroy());
@@ -1167,12 +1167,12 @@ export function createGatewayServer(
               delete respHeaders['content-length'];
               delete respHeaders['content-encoding'];
               respHeaders['content-length'] = String(out.length);
-              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              res.end(out);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
             } catch {
               const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              res.end(Buffer.concat(chunks));
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(Buffer.concat(chunks));
             }
           });
           upstreamRes.on('error', () => res.destroy());
@@ -1189,6 +1189,11 @@ export function createGatewayServer(
           (parsedUrl.pathname.startsWith('/plugins/') && parsedUrl.searchParams.has('rev'));
         if (isHashedStatic) {
           respHeaders['cache-control'] = 'public, max-age=31536000, immutable';
+        }
+        if (res.headersSent) {
+          // 响应已被 fail-closed 分支发送（上游仍返回了响应）：不再重复写头
+          res.destroy();
+          return;
         }
         res.writeHead(upstreamRes.statusCode ?? 502, respHeaders);
         upstreamRes.pipe(res);
@@ -1262,6 +1267,8 @@ export function createGatewayServer(
           if (!isAionuiWrite) {
             settled = true;
             const lang = langOf(req);
+            // 先中止上游请求，否则上游响应到达时会对已发送的响应再 writeHead
+            upstreamReq.destroy();
             res.status(413).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -1287,6 +1294,7 @@ export function createGatewayServer(
         // 构造）一律 fail-closed：直接拒绝，防止绕过文件夹白名单、沙盒越权、
         // 命令越权与 AI 提权审批（之前会静默透传到上游）。
         if (bodyObj === null) {
+          upstreamReq.destroy();
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
           return;
         }
@@ -1304,12 +1312,14 @@ export function createGatewayServer(
               // 缓存里没有该 workspaceId 的映射（进程重启后/从未有 workspace.list
               // 经过网关）：无法确认目标目录在白名单内，fail-closed 拒绝
               if (wid !== null && targetPath === null) {
+                upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
                 return;
               }
             }
           }
           if (targetPath !== null && !folderAllowed(targetPath, reqAs.dshpwPerms!.allowed_folders)) {
+            upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -1321,6 +1331,7 @@ export function createGatewayServer(
             SANDBOX_RANK[reqAs.dshpwPerms!.sandbox_mode as keyof typeof SANDBOX_RANK] ?? 0;
           const targetRank = preset === null ? assignedRank : sandboxPresetRank(preset);
           if (targetRank > assignedRank) {
+            upstreamReq.destroy();
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.sandboxDenied')));
             return;
           }
@@ -1334,6 +1345,7 @@ export function createGatewayServer(
               SANDBOX_RANK[reqAs.dshpwPerms!.sandbox_mode as keyof typeof SANDBOX_RANK] ?? 0;
             const targetRank = sandboxPresetRank(preset);
             if (targetRank > assignedRank) {
+              upstreamReq.destroy();
               res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.sandboxDenied')));
               return;
             }

@@ -1,10 +1,12 @@
 // 不可见 token 上报组件：挂在 dsh 会话作用域槽 `conversation.composer.dock`。
 // 该槽的标准 props 里带有 `useProjection`（dsh 的第五个框架 hook seat），
-// 读 `tokenUsage` 投影（宿主 token-meter 计算的"全日志 provider 计费"，字段为
-// uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens）。
+// 读 `tokenUsage` 投影（宿主 token-meter 计算的"全日志 provider 计费"）。
 //
-// 计费口径：四个字段全部计入（cacheRead/cacheWrite 虽然单价低，但也是真实
-// 消耗；全部计入保证子用户配额不被系统性低估——配额从严，宁紧勿松）。
+// ⚠️ 计费口径：只计 `uncachedInputTokens + outputTokens`。
+// 实测 dsh 的 tokenUsage 投影里 `cacheReadTokens` 是【每个 step 的缓存累计量】
+// 而非增量，而投影的 last-sample-replacing 聚合把它当增量逐 step 累加，
+// 导致 cacheRead 虚高 60 倍（一个会话报出 1000 万+）。
+// 因此 cacheRead/cacheWrite 不计入配额，避免子用户额度被系统性虚耗。
 //
 // 设计要点：投影值是【会话内累计值】而非增量。这里记录"上次观测到的累计值"，
 // 只把差值累进 pending，再按固定间隔 POST 到密码门 `/gateway/api/usage/report`，
@@ -33,11 +35,8 @@ export function TokenReporter({ useProjection }: { useProjection: UseProjection 
   // 累计投影增量
   useEffect(() => {
     if (!usage) return;
-    const total =
-      (usage.uncachedInputTokens ?? 0) +
-      (usage.outputTokens ?? 0) +
-      (usage.cacheReadTokens ?? 0) +
-      (usage.cacheWriteTokens ?? 0);
+    // 只计真实消耗（uncached 输入 + 输出）；cacheRead 因 dsh 投影虚高不计入
+    const total = (usage.uncachedInputTokens ?? 0) + (usage.outputTokens ?? 0);
     if (lastTotal.current === null) {
       lastTotal.current = total;
       return;
