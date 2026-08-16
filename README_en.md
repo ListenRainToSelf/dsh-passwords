@@ -87,7 +87,7 @@ dsh-passwords install     # generates a random SETUP_KEY, registers the plugin a
 
 The script handles everything: install dependencies → build → **generate a random SETUP_KEY** → register as a dsh plugin → apply the remote-settings patch.
 
-At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **Delete that file after your first-time setup** — it is only needed once.
+At the end the script prints your **setup key (SETUP_KEY)** on screen; it is also saved to `setup-key.txt` in the install directory. **It is deleted automatically right after the first-time setup succeeds**, and the derived keys in `.env` are frozen to independent variables and the SETUP_KEY rotated — nothing to do manually.
 
 ### 2. Finish setup in three steps
 
@@ -229,10 +229,11 @@ Then as usual: start dsh → the gate starts automatically → open `https://<yo
 Passwords are stored only as bcrypt hashes; usernames, IPs and audit records are encrypted at rest; every login and failure is audited; certificate-issuance failure stops the service instead of downgrading to plaintext. All keys live in your own `.env` and database — open source code does not weaken security.
 
 - **Brute-force protection**: failed logins lock the account, and the lock duration backs off per round (1 → 5 → 15 → 60 minutes, capped). Owner accounts can't be globally locked out by IP-rotation (per-IP locking still applies) — prevents account-level DoS.
+- **Password-spray protection (per-IP throttle)**: 30 failed logins from the same IP within 15 minutes → that IP is globally throttled for 30 minutes (accumulated across usernames — aimed at the "one IP rotating many usernames" spraying technique; bcrypt is not consumed while throttled, and a successful login lifts the throttle). If a large NAT/shared egress trips it by accident, it auto-recovers after 30 minutes with no manual action.
 - **Session revocation**: logging out revokes the token server-side immediately; changing the password/username invalidates all old sessions.
 - **Hardening tips**:
-  1. **Delete `setup-key.txt`** after the first-time setup (it is only needed once);
-  2. Set an **independent `MCP_JWT_SECRET`** and `MCP_DB_ENC_KEY` in `.env` (both via `openssl rand -hex 32`), so session/data keys aren't all derived from SETUP_KEY;
+  1. **After the first-time setup the system automatically deletes `setup-key.txt`, freezes the JWT/internal/field-encryption keys into independent `.env` variables, and rotates SETUP_KEY** — no manual steps needed; only if you deploy against an already-initialized instance (never visiting the setup page) should you delete `setup-key.txt` manually;
+  2. For stronger isolation you can set an **independent `MCP_JWT_SECRET`** and `MCP_DB_ENC_KEY` in `.env` (both via `openssl rand -hex 32`) — after first-time setup these are already frozen automatically; setting them manually just swaps in new keys;
   3. Point `MCP_DSH_RESTART_SERVICE` at the correct systemd service name.
 
 ## Language

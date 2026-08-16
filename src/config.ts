@@ -4,7 +4,8 @@
 // 任意目录下的 CLI）都读到同一份配置与同一把密钥。
 import { config as loadEnv } from 'dotenv';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -58,6 +59,8 @@ export interface PlatformConfig {
 }
 
 export function loadConfig(): PlatformConfig {
+  // F-07：启动时收紧 .env 权限（POSIX 0600），防止同机其他用户/备份泄露密钥
+  tightenEnvPerm(envFilePath());
   const setupKey = readEnv('SETUP_KEY', '');
   // JWT 密钥：留空则用 setupKey 做稳定派生，重启不失效
   const jwtSecret =
@@ -146,6 +149,89 @@ export function loadConfig(): PlatformConfig {
       restartService,
     },
   };
+}
+
+/** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */
+export function envFilePath(): string {
+  return process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env');
+}
+
+/**
+ * F-07 补强：.env 是全部密钥的载体，POSIX 下启动时收紧为仅属主可读写（0600），
+ * 防止备份/目录共享/同机其他用户读取。Windows 无 POSIX 权限，自动跳过。
+ */
+function tightenEnvPerm(file: string): void {
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    // 非 POSIX / 只读挂载：忽略（不影响启动）
+  }
+}
+
+/**
+ * F-07：首次配置成功后自动加固密钥残留面。
+ *   1. 把当前派生密钥固化为显式 .env 变量（MCP_JWT_SECRET / MCP_INTERNAL_SECRET /
+ *      MCP_DB_ENC_KEY）——此后即使 SETUP_KEY 泄露，也不再连带伪造会话/解密数据库；
+ *   2. SETUP_KEY 轮换为新随机值（旧值立即失效；仍保留非空以满足插件 configured 检查）；
+ *   3. 删除安装脚本写入的 setup-key.txt（只用于第一次初始化，用完即删）。
+ * 幂等：已显式设置过的密钥不覆盖；.env 不存在/不可写时静默跳过（不影响初始化主流程）。
+ */
+export function hardenSecretsAfterSetup(config: PlatformConfig): void {
+  const envFile = envFilePath();
+  if (!existsSync(envFile)) return;
+  let raw: string;
+  try {
+    raw = readFileSync(envFile, 'utf8');
+  } catch {
+    return;
+  }
+
+  // 需要固化的密钥：当前运行进程里真正生效的值（与 loadConfig 派生一致）
+  const freeze: Record<string, string> = {
+    MCP_JWT_SECRET: config.jwtSecret,
+    MCP_INTERNAL_SECRET: config.internalSecret,
+    MCP_DB_ENC_KEY: config.dbEncKey || config.setupKey,
+  };
+  const newSetupKey = randomBytes(24).toString('hex');
+
+  // 逐行重写：保留注释与无关键，替换/追加目标键
+  const lines = raw.split(/\r?\n/);
+  const present = new Set<string>();
+  const out: string[] = [];
+  for (const line of lines) {
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (m && !line.trimStart().startsWith('#')) {
+      const key = m[1];
+      present.add(key);
+      if (key === 'SETUP_KEY') {
+        out.push(`SETUP_KEY=${newSetupKey}`); // 轮换
+        continue;
+      }
+      if (freeze[key] !== undefined && m[2] === '') {
+        out.push(`${key}=${freeze[key]}`); // 空值补成当前生效值
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  for (const key of Object.keys(freeze)) {
+    if (!present.has(key)) out.push(`${key}=${freeze[key]}`); // 缺失则追加
+  }
+
+  try {
+    writeFileSync(envFile, out.join('\n') + (out.length > 0 ? '\n' : ''), { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // 写入失败不阻断初始化（用户仍可登录）；下次安装/重启时 .env 仍在
+    return;
+  }
+
+  // 删除安装脚本写入的一次性密钥文件
+  try {
+    const keyFile = path.join(path.dirname(envFile), 'setup-key.txt');
+    if (existsSync(keyFile)) unlinkSync(keyFile);
+  } catch {
+    // 删除失败不影响主流程；README 已有手动删除指引
+  }
 }
 
 /** 公网 IPv4 判定（排除私网/环回/链路本地/CGNAT/文档段） */

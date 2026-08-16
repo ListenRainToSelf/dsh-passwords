@@ -15,6 +15,7 @@ import zlib from 'node:zlib';
 import { URL } from 'node:url';
 import express, { type Request, type Response } from 'express';
 import type { PlatformConfig } from './config.js';
+import { hardenSecretsAfterSetup } from './config.js';
 import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
@@ -22,6 +23,7 @@ import {
   isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
+  isAdminOnlyPluginEndpoint,
   isAionuiFileRead,
   isAionuiFileWrite,
   isAionuiPanel,
@@ -673,6 +675,13 @@ export function createGatewayServer(
 
     try {
       await auth.setup({ setupKey, username, password }, meta);
+      // F-07：初始化成功 → 固话派生密钥 + 轮换 SETUP_KEY + 删 setup-key.txt
+      // （失败不阻断初始化，用户仍能进入登录页）
+      try {
+        hardenSecretsAfterSetup(config);
+      } catch (error) {
+        console.error('[dsh-passwords] 首次配置密钥加固失败（可忽略，建议手动删除 setup-key.txt）:', error);
+      }
       res.redirect(302, '/gateway/login');
     } catch (error) {
       // 真实状态码：409 已初始化 / 401 密钥错误 / 400 参数错误
@@ -1038,6 +1047,12 @@ export function createGatewayServer(
         const lang = langOf(req);
         if (perms.banned) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
+          return;
+        }
+        // F-09：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens 等）
+        // 不在网关权限模型内，对子用户一律 403（仅主用户可访问），防绕过白名单/沙盒/配额
+        if (isAdminOnlyPluginEndpoint(parsed.pathname)) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
           return;
         }
         if (!perms.allow_upload && isUploadRequest(req.method, parsed.pathname)) {

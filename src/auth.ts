@@ -18,6 +18,15 @@ const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 /** 锁定时长随失败轮次退避（第 N 轮锁定 N 分钟，封顶 60）：降低攻击者循环锁死账号的可持续性 */
 const LOCK_STEPS = [1, 5, 15, 60] as const;
+/**
+ * IP 级节流（F-11 密码喷洒）：单 IP 在窗口内失败达阈值 → 该 IP 全局节流。
+ * 覆盖“单 IP 轮换多用户名”的喷洒手法——每个 (用户名,IP) 对只贡献几次失败，
+ * 单用户锁定触发不了，但同一 IP 的总失败数会快速达到阈值。
+ * 阈值/窗口取宽松值：切断自动化喷洒，同时避免大 NAT（公司/校园共享出口）误伤。
+ */
+const IP_MAX_FAILED = 30;
+const IP_WINDOW_MS = 15 * 60 * 1000;
+const IP_THROTTLE_MINUTES = 30;
 /** 时序均衡用空跑哈希：用户不存在时也执行一次 bcrypt，抹平“快=不存在”的枚举差异 */
 const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUNDS);
 
@@ -141,6 +150,19 @@ export class AuthService {
     const password = typeof input.password === 'string' ? input.password.slice(0, 256) : '';
     const ip = meta.ip ?? 'unknown';
 
+    // 0) IP 级节流检查（F-11 密码喷洒）：先于凭据校验，节流期间不消耗 bcrypt
+    const ipThrottle = this.db.getIpThrottle(ip);
+    if (ipThrottle?.throttled_until && ipThrottle.throttled_until.getTime() > Date.now()) {
+      const remainMin = Math.ceil((ipThrottle.throttled_until.getTime() - Date.now()) / 60000);
+      await this.db.audit('ip_throttled_blocked', {
+        username,
+        ip,
+        userAgent: meta.userAgent,
+        detail: `IP 触发节流，拒绝登录，剩余 ${remainMin} 分钟`,
+      });
+      throw new AuthError('IP_THROTTLED', { minutes: remainMin }, 429);
+    }
+
     // 1) 锁定检查（防暴力破解）
     const attempt = await this.db.getLoginAttempt(username, ip);
     if (attempt?.locked_until && attempt.locked_until.getTime() > Date.now()) {
@@ -163,6 +185,19 @@ export class AuthService {
       await bcrypt.compare(password, DUMMY_HASH); // 空跑一次，抹平时序差异
     }
     if (!user || !valid) {
+      // 0.5) 记录 IP 级失败（跨用户名累计，防密码喷洒）；达阈值 → 该 IP 全局节流
+      const ipCount = this.db.recordIpFailure(ip, IP_WINDOW_MS);
+      if (ipCount >= IP_MAX_FAILED) {
+        const until = new Date(Date.now() + IP_THROTTLE_MINUTES * 60000);
+        this.db.throttleIp(ip, until);
+        await this.db.audit('ip_throttled', {
+          username,
+          ip,
+          userAgent: meta.userAgent,
+          detail: `IP ${IP_WINDOW_MS / 60000} 分钟内失败 ${ipCount} 次，节流 ${IP_THROTTLE_MINUTES} 分钟`,
+        });
+        throw new AuthError('IP_THROTTLED', { minutes: IP_THROTTLE_MINUTES }, 429);
+      }
       const count = await this.db.recordLoginFailure(username, ip);
       // 锁定时长随失败轮次退避（round 0 → 1 分钟，1 → 5，2 → 15，3+ → 60 封顶）
       const round = Math.max(0, Math.floor((count - 1) / MAX_FAILED));
@@ -203,8 +238,9 @@ export class AuthService {
       throw new AuthError('INVALID_CREDENTIALS', {}, 401);
     }
 
-    // 3) 成功：清除失败计数 + 记录审计
+    // 3) 成功：清除失败计数 + IP 节流 + 记录审计
     await this.db.resetLoginAttempts(username, ip);
+    this.db.resetIpThrottle(ip);
     await this.db.touchLogin(user.id);
     await this.db.audit('login_success', { username, ip, userAgent: meta.userAgent });
 

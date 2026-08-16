@@ -315,8 +315,10 @@ export function apply(ctx: Context): void {
         if (!caller) return;
         // F-05：全量用户列表仅主用户可见；子用户只见自己 + 有消息往来的用户
         // （避免多租户场景下的用户名目录泄露给低权限账号）
+        // F-10：子用户的“自己”行用安全投影（getUserListRowById），不泄露 password_hash
+        const me = caller.role === 'admin' ? null : db!.getUserListRowById(caller.userId);
         const users: UserListRow[] =
-          caller.role === 'admin' ? db!.listUsers() : [db!.getUserById(caller.userId)!, ...db!.listMessageContacts(caller.userId)];
+          caller.role === 'admin' ? db!.listUsers() : [...(me ? [me] : []), ...db!.listMessageContacts(caller.userId)];
         writeJson(res, 200, {
           ok: true,
           me: { username: caller.username, role: caller.role },

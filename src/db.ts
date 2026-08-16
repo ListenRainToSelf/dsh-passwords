@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(username_hash, ip_hash)
 );
+CREATE TABLE IF NOT EXISTS ip_throttle (
+  ip_hash        TEXT PRIMARY KEY,
+  failed_count   INTEGER NOT NULL DEFAULT 0,
+  window_started TEXT NOT NULL DEFAULT (datetime('now')),
+  throttled_until TEXT,
+  updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS user_permissions (
   user_id            INTEGER PRIMARY KEY,
   allowed_folders    TEXT,                          -- JSON 字符串数组（绝对路径）
@@ -384,6 +391,24 @@ export class Database {
     return { ...row, username: this.crypto.decrypt(row.username) ?? '' };
   }
 
+  /**
+   * 单用户的安全投影（不含 password_hash / credential_version），
+   * 供外部接口返回“自己”行时使用（F-10：state 接口不得泄露 bcrypt 哈希）。
+   */
+  getUserListRowById(id: number): UserListRow | null {
+    const row = this.stmt(
+      'SELECT id, username, role, created_at, last_login_at FROM users WHERE id = ?',
+    ).get(id) as (Omit<UserListRow, 'username'> & { username: string }) | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      username: this.crypto.decrypt(row.username) ?? '',
+      role: row.role === 'admin' ? 'admin' : 'user',
+      created_at: row.created_at,
+      last_login_at: row.last_login_at,
+    };
+  }
+
   /** 用户列表（用户名已解密），按创建顺序 */
   listUsers(): UserListRow[] {
     const rows = this.stmt(
@@ -563,6 +588,62 @@ export class Database {
       this.crypto.lookupHash(username),
       this.crypto.lookupHash(ip),
     );
+  }
+
+  // ── 网络安全审查：IP 级节流（防密码喷洒：单 IP 轮换多用户名） ─────
+  getIpThrottle(ip: string): { failed_count: number; window_started: Date; throttled_until: Date | null } | null {
+    const row = this.stmt(
+      'SELECT failed_count, window_started, throttled_until FROM ip_throttle WHERE ip_hash = ?',
+    ).get(this.crypto.lookupHash(ip)) as
+      | { failed_count: number; window_started: string; throttled_until: string | null }
+      | undefined;
+    return row
+      ? {
+          failed_count: Number(row.failed_count),
+          window_started: new Date(row.window_started),
+          throttled_until: row.throttled_until ? new Date(row.throttled_until) : null,
+        }
+      : null;
+  }
+
+  /**
+   * 记录该 IP 的一次登录失败（跨用户名累计）。窗口过期或上次节流已到期时
+   * 重置计数，避免被误伤用户“试一次又续 30 分钟”。返回窗口内累计失败数。
+   */
+  recordIpFailure(ip: string, windowMs: number): number {
+    const now = new Date();
+    const hash = this.crypto.lookupHash(ip);
+    const existing = this.getIpThrottle(ip);
+    if (!existing) {
+      this.stmt('INSERT INTO ip_throttle (ip_hash, failed_count, window_started) VALUES (?, 1, ?)').run(
+        hash,
+        now.toISOString(),
+      );
+      return 1;
+    }
+    const windowExpired = now.getTime() - existing.window_started.getTime() > windowMs;
+    const throttleExpired = existing.throttled_until !== null && existing.throttled_until.getTime() <= now.getTime();
+    if (windowExpired || throttleExpired) {
+      this.stmt(
+        'UPDATE ip_throttle SET failed_count = 1, window_started = ?, throttled_until = NULL WHERE ip_hash = ?',
+      ).run(now.toISOString(), hash);
+      return 1;
+    }
+    this.stmt('UPDATE ip_throttle SET failed_count = failed_count + 1 WHERE ip_hash = ?').run(hash);
+    return existing.failed_count + 1;
+  }
+
+  /** 节流该 IP：窗口内失败达阈值后设置过期时间（期间拒绝一切登录尝试） */
+  throttleIp(ip: string, until: Date): void {
+    this.stmt('UPDATE ip_throttle SET throttled_until = ?, updated_at = datetime(\'now\') WHERE ip_hash = ?').run(
+      until.toISOString(),
+      this.crypto.lookupHash(ip),
+    );
+  }
+
+  /** 登录成功后清除该 IP 的节流记录（正常用户不再受限） */
+  resetIpThrottle(ip: string): void {
+    this.stmt('DELETE FROM ip_throttle WHERE ip_hash = ?').run(this.crypto.lookupHash(ip));
   }
 
   // ── 子用户权限（网关强制执行） ────────────────────────────
