@@ -76,7 +76,7 @@ export const zh = {
   permsSave: '保存权限',
   permsSaved: '权限已保存',
   permsSandbox: '沙盒权限',
-  sandboxNone: '不更改',
+  sandboxNone: '不限制（跟随 dsh 默认）',
   sandboxReadOnly: '只读',
   sandboxWorkspace: '可写工作区',
   sandboxFull: '完全访问',
@@ -106,6 +106,8 @@ export const zh = {
   'err.NOT_CONFIGURED': '未配置：请先完成 dsh-passwords 部署（.env 中 SETUP_KEY 等），再重启 dsh',
   'err.NOT_AUTHENTICATED': '未登录或会话已失效',
   'err.FORBIDDEN_CSRF': '请求被拒绝（跨站伪造防护）',
+  'err.FORBIDDEN': '仅主用户可操作',
+  'err.INVALID': '输入无效，请检查后重试',
   'err.INTERNAL': '内部错误',
 };
 
@@ -176,7 +178,7 @@ export const en: Record<keyof typeof zh, string> = {
   permsSave: 'Save permissions',
   permsSaved: 'Permissions saved',
   permsSandbox: 'Sandbox permission',
-  sandboxNone: 'No change',
+  sandboxNone: 'No restriction (dsh default)',
   sandboxReadOnly: 'Read-only',
   sandboxWorkspace: 'Workspace write',
   sandboxFull: 'Full access',
@@ -204,6 +206,8 @@ export const en: Record<keyof typeof zh, string> = {
   'err.NOT_CONFIGURED': 'Not configured: finish the dsh-passwords deployment first (SETUP_KEY etc. in .env), then restart dsh',
   'err.NOT_AUTHENTICATED': 'Not signed in or the session has expired',
   'err.FORBIDDEN_CSRF': 'Request rejected (cross-site forgery protection)',
+  'err.FORBIDDEN': 'Owner-only operation',
+  'err.INVALID': 'Invalid input, please check and retry',
   'err.INTERNAL': 'Internal error',
 };
 

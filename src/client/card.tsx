@@ -67,6 +67,14 @@ interface PermDraft {
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
+/** 本地时间格式化（ISO → 可读的 YYYY-MM-DD HH:mm） */
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 type ApiError = { error?: string; code?: string };
 
 function api<T>(path: string, body?: unknown): Promise<T> {
@@ -253,13 +261,24 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const savePermissions = (userId: number) => {
     const d = permDrafts[userId];
     if (!d) return;
+    // 非法/小数/负数输入不能静默转 null（=不限）：校验后给出提示
+    const tokenNum = d.token.trim() === '' ? null : Number(d.token);
+    const minutesNum = d.minutes.trim() === '' ? null : Number(d.minutes);
+    if (tokenNum !== null && (!Number.isInteger(tokenNum) || tokenNum < 0)) {
+      setError(t('err.INVALID'));
+      return;
+    }
+    if (minutesNum !== null && (!Number.isInteger(minutesNum) || minutesNum < 0)) {
+      setError(t('err.INVALID'));
+      return;
+    }
     void run(
       () =>
         api('/gateway/api/permissions', {
           userId,
           allowedFolders: d.folders,
-          hourlyTokenLimit: d.token.trim() === '' ? null : Number(d.token),
-          dailyMinutesLimit: d.minutes.trim() === '' ? null : Number(d.minutes),
+          hourlyTokenLimit: tokenNum,
+          dailyMinutesLimit: minutesNum,
           allowUpload: d.upload,
           allowGitDownload: d.git,
           banned: d.banned,
@@ -404,7 +423,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
               u.role === 'admin'
                 ? h('span', { className: 'dshpw-badge admin' }, t('owner'))
                 : h('span', { className: 'dshpw-badge' }, t('subuser')),
-              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: u.last_login_at })) : null,
+              u.last_login_at ? h('span', { className: 'dshpw-hint' }, t('lastLogin', { time: fmtTime(u.last_login_at) })) : null,
             ),
             u.username !== me &&
               h('button', { className: 'dshpw-btn danger', disabled: busy, onClick: () => removeUser(u.username) }, t('remove')),

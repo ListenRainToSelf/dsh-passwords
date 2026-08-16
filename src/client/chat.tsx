@@ -106,6 +106,7 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
             lastSeenId.current = Math.max(lastSeenId.current, maxId);
             initializedRef.current = true;
             setMessages((prev) => mergeById(prev, incoming));
+            setError('');
           } else if (!res.ok) {
             setError(d.error ?? t('chat.loadFailed'));
           }

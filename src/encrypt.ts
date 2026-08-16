@@ -26,6 +26,11 @@ export interface FieldCrypto {
 
 export function createFieldCrypto(dbEncKey: string, setupKey: string): FieldCrypto {
   const master = dbEncKey || setupKey;
+  if (!master) {
+    // 纵深防御：主密钥为空时“加密”退化为可预测密钥（等于没加密）。
+    // 正常入口（cli/plugin）都强制 SETUP_KEY 非空，这里兜底防未来新增入口漏拦。
+    throw new Error('字段加密主密钥为空：请配置 SETUP_KEY 或 MCP_DB_ENC_KEY');
+  }
   // 域分离：两个子密钥互不通用（HMAC 密钥即使泄露也无法解密字段数据）
   const fieldKey = createHash('sha256').update('dsh-field:' + master).digest();
   const lookupKey = createHash('sha256').update('dsh-lookup:' + master).digest();

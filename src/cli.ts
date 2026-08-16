@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import {
   findDshRoot,
   applyRemotePatch,
+  rollbackPatch,
   restartDshWeb,
   patchStatus,
 } from './patch.js';
@@ -134,6 +135,20 @@ function runPatch(argv: string[]): void {
     }
     return;
   }
+  if (action === 'off') {
+    // 回滚补丁：从 .bak-dshpw 恢复原始文件（补丁导致设置页异常时用）
+    const result = rollbackPatch(root);
+    console.log(`  ${tr('cli.result')}: ${result}`);
+    if (result === 'rolled-back' && config.patch.restartService) {
+      console.log(`  ${tr('cli.restarting', { service: config.patch.restartService })}`);
+      try {
+        execSync(`systemctl restart ${config.patch.restartService}`, { stdio: 'inherit' });
+      } catch (error) {
+        console.error(`  ${tr('cli.restartFailed')}: ${String(error)}`);
+      }
+    }
+    return;
+  }
   console.error(tr('cli.usage'));
   process.exit(1);
 }
@@ -145,7 +160,6 @@ async function boot() {
     process.exit(1);
   }
 
-  const mode = process.argv[2] ?? 'serve-gateway';
   const cli = parseCliOverrides(process.argv.slice(3));
 
   // 启动参数覆盖 .env / 环境变量
@@ -349,9 +363,13 @@ if (process.argv[2] === '--version' || process.argv[2] === '-v' || process.argv[
   runAudit(process.argv.slice(3));
 } else if (process.argv[2] === 'patch') {
   runPatch(process.argv.slice(3));
-} else {
+} else if (process.argv[2] === undefined || process.argv[2] === 'serve-gateway' || process.argv[2] === 'serve') {
   boot().catch((error) => {
     console.error(`[dsh-passwords] ${tr('cli.startFailed')}:`, error);
     process.exit(1);
   });
+} else {
+  // 未知子命令：报 usage 而不是静默启动网关（拼错命令不会误开服务）
+  console.error(`[dsh-passwords] ${tr('cli.usage')}`);
+  process.exit(1);
 }

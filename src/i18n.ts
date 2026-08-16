@@ -291,7 +291,8 @@ export function resolveGatewayLang(input: {
 
 /** 解析 CLI 语言：LANG / LC_ALL / LC_MESSAGES 以 en 开头 → en，否则 zh */
 export function resolveCliLang(): Lang {
-  for (const key of ['LANG', 'LC_ALL', 'LC_MESSAGES']) {
+  // POSIX 优先级：LC_ALL > LC_MESSAGES > LANG
+  for (const key of ['LC_ALL', 'LC_MESSAGES', 'LANG']) {
     const value = process.env[key];
     if (typeof value !== 'string' || value === '') continue;
     const lower = value.toLowerCase();

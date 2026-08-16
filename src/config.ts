@@ -70,7 +70,10 @@ export function loadConfig(): PlatformConfig {
 
   const dbPath = readEnv(
     'MCP_DB_PATH',
-    path.resolve(process.cwd(), 'data', 'platform.db'),
+    // 默认基于模块目录而非 cwd：无论从哪个目录运行都指向同一数据库，
+    // 与 .env 的模块相对解析语义保持一致（否则 systemd/CLI/调试目录
+    // 会各自开一个新库，表现为“配置改了不生效/数据丢了”）
+    path.resolve(moduleDir, '..', 'data', 'platform.db'),
   );
 
   // MCP_DSH_RESTART_SERVICE 语义：未设置→默认 'dsh-web'；显式空值→不自动重启。
@@ -100,13 +103,21 @@ export function loadConfig(): PlatformConfig {
   const autoTls = !userCerts && !autoOff && (autoOn || autoTlsRaw === '');
   const acmeDir = path.join(path.dirname(dbPath), 'acme');
 
+  const gatewayPortRaw = readEnv('MCP_GATEWAY_PORT', '8080').trim();
+  const gatewayPortNum = Number(gatewayPortRaw);
+  // 端口非法（非数字/越界）回退默认 8080，避免 listen(NaN) 的泛化报错
+  const gatewayPort =
+    gatewayPortRaw !== '' && Number.isInteger(gatewayPortNum) && gatewayPortNum > 0 && gatewayPortNum <= 65535
+      ? gatewayPortNum
+      : 8080;
+
   return {
     setupKey,
     dbPath,
     dbEncKey: readEnv('MCP_DB_ENC_KEY', ''),
     gateway: {
       host: readEnv('MCP_GATEWAY_HOST', '0.0.0.0'),
-      port: Number(readEnv('MCP_GATEWAY_PORT', '8080')),
+      port: gatewayPort,
       upstream: readEnv('MCP_GATEWAY_UPSTREAM', 'http://127.0.0.1:3080'),
       tls: userCerts
         ? { cert: userTlsCert, key: userTlsKey }
@@ -140,6 +151,9 @@ export function loadConfig(): PlatformConfig {
 /** 公网 IPv4 判定（排除私网/环回/链路本地/CGNAT/文档段） */
 export function isPublicIp(value: string): boolean {
   if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
-  if (!value.split('.').every((part) => Number(part) <= 255)) return false;
-  return !/^(0\.|10\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|198\.18\.|198\.51\.100\.|203\.0\.113\.)/.test(value);
+  const parts = value.split('.').map((p) => Number(p));
+  if (parts.some((n) => n > 255)) return false;
+  // 归一化后判断私有段（前导零如 010.0.0.1 会被 Number 归一成 10.0.0.1）
+  const normalized = parts.join('.');
+  return !/^(0\.|10\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|198\.18\.|198\.51\.100\.|203\.0\.113\.)/.test(normalized);
 }

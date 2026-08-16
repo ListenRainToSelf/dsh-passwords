@@ -31,18 +31,23 @@ export function defaultPermissions(): UserPermissions {
   };
 }
 
-/** 规范化路径：反斜杠转正斜杠、去尾部斜杠，便于前缀比较 */
+/** 规范化路径：反斜杠转正斜杠、去尾部斜杠、Windows 盘符统一小写（大小写不敏感比较） */
 function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/\/+$/, '');
+  let n = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (n.length >= 2 && n[1] === ':') n = n[0].toLowerCase() + n.slice(1);
+  return n;
 }
 
-/** path 是否命中 allowed 白名单（相等或为某白名单目录的子路径；空白名单 = 全部允许） */
+/**
+ * path 是否命中 allowed 白名单（相等或为某白名单目录的子路径；空白名单 = 全部允许）。
+ * 白名单条目为 `/`（根）时视为全盘允许。
+ */
 export function folderAllowed(path: string, allowedFolders: string[]): boolean {
   if (allowedFolders.length === 0) return true;
   const p = normalizePath(path);
   return allowedFolders.some((entry) => {
     const base = normalizePath(entry);
-    if (base === '') return false;
+    if (base === '' || base === '/') return true;
     return p === base || p.startsWith(base + '/');
   });
 }
@@ -60,6 +65,7 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
         item !== null &&
         typeof item === 'object' &&
         typeof (item as Record<string, unknown>)[field] === 'string' &&
+        (item as Record<string, unknown>)[field] !== '' &&
         !folderAllowed((item as Record<string, unknown>)[field] as string, allowedFolders)
       ) {
         continue;
@@ -187,19 +193,21 @@ export function isUploadRequest(method: string, pathname: string): boolean {
   if (method !== 'POST' && method !== 'PUT') return false;
   return (
     pathname === '/api/dsh-uploads' ||
+    pathname.startsWith('/api/dsh-uploads/') ||
     pathname === '/api/filePathBridge/importFile' ||
-    pathname === '/api/dsh-uploads/' ||
     pathname === '/api/dsh-ssh/upload'
   );
 }
 
 /**
- * git 相关端点（dsh 内置 git 工具 / git-graph 插件 / aionui-panel 的 git 面板等，尽力匹配）。
- * 同时覆盖“从服务器拿走数据”的其它通道：session.export（会话日志 ZIP）与 dsh-ssh 的远程文件下载。
+ * git 相关端点（dsh 内置 git 工具 RPC：git.clone / git.pull / git.fetch 等；
+ * git-graph 插件；aionui-panel 的 git 面板；以及“从服务器拿走数据”的其它通道：
+ * session.export 会话日志 ZIP、dsh-ssh 远程文件下载）。
+ * 只匹配 git 前缀的 RPC（不拦 session.fetch 这类普通端点）。
  */
 export function isGitRequest(pathname: string): boolean {
   return (
-    /\/api\/[^/]*(git|clone|pull|fetch)[^/]*/i.test(pathname) ||
+    /^\/api\/git[-.\/]/i.test(pathname) ||
     /^\/aionui-panel\/git[-.]/.test(pathname) ||
     /^\/api\/session[.\/]export/.test(pathname) ||
     /^\/api\/dsh-ssh[.\/](download|ls)/.test(pathname)
@@ -248,15 +256,15 @@ export function aionuiRootFrom(
   return null;
 }
 
-/** 工作区创建/删除等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
+/** 工作区创建/删除/重命名等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
 export function isWorkspaceWrite(pathname: string): boolean {
-  return /^\/api\/workspace[.\/](add|create|import|remove|delete)/.test(pathname);
+  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move)/.test(pathname);
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────
 
 /** 涉及创建/切换工作区的 dsh typert RPC（斜杠风格：/api/session/create 等；兼容点号风格） */
-export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create|fork)/;
+export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create|fork)([.\/]|$)/;
 
 /** 请求体里可能携带目标路径的字段名（按优先级） */
 const PATH_FIELDS = [
@@ -288,25 +296,8 @@ export function extractPathFromBody(value: unknown, depth = 0): string | null {
   return null;
 }
 
-// ── token 用量识别（尽力而为：扫描 dsh 流式/JSON 响应里的用量字段） ─────
-
-// dsh 的 TokenUsage：{ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens }。
-// 每个 agent step 上报一次（非累计），因此跨事件求和；input + output 即"两个数据一比对"的总消耗。
-const TOKEN_USAGE_RE = /"(?:inputTokens|outputTokens)"\s*:\s*(\d+)/g;
-
-/**
- * 从一段响应文本里累加 token 用量（input + output）。识别不到返回 0（不会误扣）。
- */
-export function tokensFromText(text: string): number {
-  let total = 0;
-  let m: RegExpExecArray | null;
-  TOKEN_USAGE_RE.lastIndex = 0;
-  while ((m = TOKEN_USAGE_RE.exec(text)) !== null) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n)) total += n;
-  }
-  return total;
-}
+// ── token 用量：已迁移到客户端 TokenReporter（client/token.tsx 读 dsh 的
+// liveTokenUsage 投影并增量上报 /gateway/api/usage/report），本模块不再计量。
 
 /** 当日日期（本地时区 YYYY-MM-DD，与"每日使用时长"语义一致） */
 export function todayLocal(): string {

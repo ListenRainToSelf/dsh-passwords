@@ -579,12 +579,17 @@ export function createGatewayServer(
   }
 
   // ── 留言 / 聊天（SSE 广播） ────────────────────────────────
-  const chatClients = new Set<Response>();
+  // 订阅者带 userId，广播时按收件人过滤（与 GET /gateway/api/messages 的
+  // 列表语义一致）：定向消息只推给收件人与发件人，公开消息推给所有人。
+  const chatClients = new Set<{ res: Response; userId: number }>();
   function broadcastMessage(msg: MessageRow): void {
     const payload = `data: ${JSON.stringify(msg)}\n\n`;
     for (const client of chatClients) {
+      const visible =
+        msg.recipient_id === null || msg.recipient_id === client.userId || msg.sender_id === client.userId;
+      if (!visible) continue;
       try {
-        client.write(payload);
+        client.res.write(payload);
       } catch {
         chatClients.delete(client);
       }
@@ -692,7 +697,9 @@ export function createGatewayServer(
           config.gateway.tls !== null ? '; Secure' : ''
         }`,
       );
-      res.redirect(302, next);
+      // 中文/非 ASCII 路径需重新编码（Node 的 Location 头只接受 latin1，
+      // 直接 setHeader 会抛 ERR_INVALID_CHAR → 500）
+      res.redirect(302, encodeURI(next));
     } catch (error) {
       // 真实状态码：429 锁定 / 401 凭据错误 / 400 其他
       const status = error instanceof AuthError ? error.status : 400;
@@ -717,10 +724,15 @@ export function createGatewayServer(
   });
 
   // ── 内部接口：dsh 插件通知网关重载远程设置补丁 ───────────────
-  // 仅限本机 dsh 插件调用（恒定时间比对内部密钥；密钥由 SETUP_KEY 派生，
-  // 泄漏面与安装密钥一致）。响应立即返回，补丁应用与 dsh 重启异步进行，
-  // 让设置页的响应先刷给浏览器。补丁强制启用，无开关。
+  // 仅限本机 dsh 插件调用：要求回环地址 + 恒定时间比对内部密钥
+  // （密钥由 SETUP_KEY 派生，泄漏面与安装密钥一致）。响应立即返回，
+  // 补丁应用与 dsh 重启异步进行，让设置页的响应先刷给浏览器。
   app.post('/gateway/internal/patch', express.json({ limit: '4kb' }), (req, res) => {
+    const remoteIp = req.socket.remoteAddress ?? '';
+    if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+      res.status(403).json({ ok: false, error: 'forbidden' });
+      return;
+    }
     const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
     const expected = config.internalSecret;
     const a = Buffer.from(secret);
@@ -828,8 +840,11 @@ export function createGatewayServer(
       return;
     }
     const allowedFolders = stringArray(body.allowedFolders);
-    const hourlyTokenLimit = nullableInt(body.hourlyTokenLimit);
-    const dailyMinutesLimit = nullableInt(body.dailyMinutesLimit);
+    // 0 归一为 null（=不限）：避免"每日 0 分钟"被误当作"首次使用即封禁"
+    const rawToken = nullableInt(body.hourlyTokenLimit);
+    const rawMinutes = nullableInt(body.dailyMinutesLimit);
+    const hourlyTokenLimit = rawToken === 0 ? null : rawToken;
+    const dailyMinutesLimit = rawMinutes === 0 ? null : rawMinutes;
     const allowUpload = body.allowUpload !== false;
     const allowGitDownload = body.allowGitDownload !== false;
     const banned = body.banned === true;
@@ -865,9 +880,18 @@ export function createGatewayServer(
   // ── token 用量上报（客户端 liveTokenUsage 投影增量，所有登录用户） ──
   // 替代旧的 HTTP 响应正则计量：客户端复用 dsh 的 tokenUsage 投影（与
   // dsh-web-ui 同源），只上报「增量」，服务端按小时窗口累计并用于配额判定。
+  // 客户端 15 秒 flush 一次；这里再加 5 秒最小间隔节流，防止被高频自刷。
+  const usageReportThrottle = new Map<number, number>();
   app.post('/gateway/api/usage/report', jsonBody, (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
+    const now = Date.now();
+    const last = usageReportThrottle.get(me.userId) ?? 0;
+    if (now - last < 5000) {
+      res.status(429).json({ ok: false, code: 'RATE_LIMITED', error: '上报过于频繁' });
+      return;
+    }
+    usageReportThrottle.set(me.userId, now);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const tokens = Number(body.tokens);
     if (!Number.isFinite(tokens) || tokens < 0 || tokens > 100_000_000) {
@@ -925,8 +949,9 @@ export function createGatewayServer(
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
     res.write(`data: ${JSON.stringify({ type: 'init', me: { id: me.userId, username: me.username, role: me.role } })}\n\n`);
-    chatClients.add(res);
-    req.on('close', () => chatClients.delete(res));
+    const client = { res, userId: me.userId };
+    chatClients.add(client);
+    req.on('close', () => chatClients.delete(client));
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
@@ -936,7 +961,9 @@ export function createGatewayServer(
   app.use((req, res, next) => {
     try {
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      if (parsed.pathname.startsWith('/gateway/')) return next();
+      // /gateway 精确路径与 /gateway/* 都视为网关自有前缀（未注册子路径由
+      // 后续中间件处理，避免透传到上游 dsh）
+      if (parsed.pathname === '/gateway' || parsed.pathname.startsWith('/gateway/')) return next();
       const user = sessionOf(req);
       if (!user) {
         // 重定向兼容层：记录原始 URL，登录后跳回
@@ -1019,6 +1046,12 @@ export function createGatewayServer(
       headers.origin = `http://${upstreamHost}:${upstreamPort}`;
     }
     delete headers['content-length'];
+    // 缓冲/改写路径用 end(body) 重写 content-length，chunked 的 transfer-encoding
+    // 若保留会造成 Node 的 ERR_HTTP_CONTENT_LENGTH_MISMATCH
+    delete headers['transfer-encoding'];
+    // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
+    // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）
+    headers['accept-encoding'] = 'gzip';
 
     const parsedUrl = new URL(req.originalUrl, `http://${req.headers.host ?? 'localhost'}`);
     // 请求上挂的用户/权限（子用户才有）
@@ -1053,9 +1086,15 @@ export function createGatewayServer(
               delete respHeaders['content-length'];
               delete respHeaders['content-encoding'];
               // 代理层补齐防嵌框头（dsh 应用自身未设置）：
-              // 允许同源内嵌（dsh 内部如有同源 iframe 不受影响），禁止跨站嵌框
+              // 允许同源内嵌（dsh 内部如有同源 iframe 不受影响），禁止跨站嵌框。
+              // 仅在上游未提供 CSP 时补充 frame-ancestors，避免冲掉上游更严的策略。
               respHeaders['x-frame-options'] = 'SAMEORIGIN';
-              respHeaders['content-security-policy'] = "frame-ancestors 'self'";
+              const upstreamCsp = String(upstreamRes.headers['content-security-policy'] ?? '');
+              if (!upstreamCsp.includes('frame-ancestors')) {
+                respHeaders['content-security-policy'] = upstreamCsp
+                  ? `${upstreamCsp}; frame-ancestors 'self'`
+                  : "frame-ancestors 'self'";
+              }
               if (encoding.includes('gzip')) {
                 out = zlib.gzipSync(out);
                 respHeaders['content-encoding'] = 'gzip';
@@ -1180,7 +1219,7 @@ export function createGatewayServer(
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
       reqAs.dshpwPerms.allowed_folders.length > 0 &&
-      (req.method === 'POST' || req.method === 'PUT') &&
+      (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(parsedUrl.pathname))) &&
       (WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname) || isAionuiPanel(parsedUrl.pathname));
     const needsSandboxCheck =
       reqAs.dshpwPerms !== undefined &&
@@ -1209,11 +1248,23 @@ export function createGatewayServer(
       let size = 0;
       let settled = false;
       const MAX_BODY = 64 * 1024;
+      // aionui-panel 写文件（/write）可能携带大 JSON，单独放宽上限并完整检查；
+      // 其余需要检查的端点 body 天然很小（session.create/settings.mutate/respond），
+      // 超限即 fail-closed，防止“超限透传”绕过权限检查。
+      const isAionuiWrite =
+        reqAs.dshpwPerms !== undefined && isAionuiPanel(parsedUrl.pathname) && req.method === 'POST';
+      const bodyLimit = isAionuiWrite ? 4 * 1024 * 1024 : MAX_BODY;
       req.on('data', (chunk: Buffer) => {
         if (settled) return;
         size += chunk.length;
-        if (size > MAX_BODY) {
-          // 超大 body（不会出现在 session.create / settings.mutate）：不检查，直接透传
+        if (size > bodyLimit) {
+          // 超大且非 aionui 写端点：拒绝，不透传（防止绕过白名单/审批检查）
+          if (!isAionuiWrite) {
+            settled = true;
+            const lang = langOf(req);
+            res.status(413).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
           settled = true;
           upstreamReq.write(Buffer.concat(chunks));
           upstreamReq.write(chunk);
@@ -1232,18 +1283,29 @@ export function createGatewayServer(
         } catch {
           bodyObj = null;
         }
+        // 需要检查的端点 body 必须是可解析的 JSON。解析失败（gzip/非 JSON 编码
+        // 构造）一律 fail-closed：直接拒绝，防止绕过文件夹白名单、沙盒越权、
+        // 命令越权与 AI 提权审批（之前会静默透传到上游）。
+        if (bodyObj === null) {
+          res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+          return;
+        }
 
         if (needsFolderCheck) {
           let targetPath: string | null = null;
-          if (bodyObj !== null) {
-            if (isAionuiPanel(parsedUrl.pathname)) {
-              // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
-              targetPath = aionuiRootFrom(req.method, parsedUrl.pathname, parsedUrl.searchParams, bodyObj);
-            } else {
-              targetPath = extractPathFromBody(bodyObj);
-              if (targetPath === null) {
-                const wid = extractWorkspaceId(bodyObj);
-                if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+          if (isAionuiPanel(parsedUrl.pathname)) {
+            // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
+            targetPath = aionuiRootFrom(req.method, parsedUrl.pathname, parsedUrl.searchParams, bodyObj);
+          } else {
+            targetPath = extractPathFromBody(bodyObj);
+            if (targetPath === null) {
+              const wid = extractWorkspaceId(bodyObj);
+              if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+              // 缓存里没有该 workspaceId 的映射（进程重启后/从未有 workspace.list
+              // 经过网关）：无法确认目标目录在白名单内，fail-closed 拒绝
+              if (wid !== null && targetPath === null) {
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+                return;
               }
             }
           }
@@ -1338,14 +1400,16 @@ export function createGatewayServer(
       socket.destroy();
       return;
     }
-    // 认证检查（复用 Cookie）
+    // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
     if (token) {
       try {
         const user = auth.verifyToken(token);
-        if (db.getUserByUsername(user.username) !== null) {
-          authed = true;
+        const row = db.getUserByUsername(user.username);
+        if (row !== null && user.cv === row.credential_version) {
+          const perms = effectivePermissions(row.id);
+          if (!perms.banned) authed = true;
         }
       } catch {
         authed = false;

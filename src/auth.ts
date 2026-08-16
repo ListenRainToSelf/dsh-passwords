@@ -36,17 +36,17 @@ export class AuthError extends Error {
 
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
-/** 密码策略：≥12 位，且大写、小写、数字、符号各至少一位 */
-const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,}$/;
+/** 密码策略：12-128 位，且大写、小写、数字、符号各至少一位（上限防 bcrypt 72 字节静默截断） */
+const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,128}$/;
 
 /**
- * SQL 注入特征（纵深防御层）。
+ * SQL 注入结构化特征（纵深防御层）。
  * 所有数据库查询均已参数化（占位符 + 值绑定），此检测针对会进入
  * 请求解析的字符串字段（password 除外——密码必须允许符号，且经 bcrypt
- * 哈希 + 参数化写入，无注入面）。
+ * 哈希 + 参数化写入，无注入面）。只拒绝结构化 SQL 注入特征（引号/分号/
+ * 注释符），不匹配英文关键词（union/select 等），避免误伤合法密钥。
  */
-const SQLI_PATTERN =
-  /('|"|;|--|\/\*|\*\/|\bunion\b|\bselect\b|\binsert\b|\bdrop\b|\bdelete\b|\bupdate\b|\btruncate\b|\bsleep\b|\bbenchmark\b)/i;
+const SQLI_PATTERN = /(['";]|--|\/\*|\*\/|`)/;
 
 export function assertNoSqlInjection(value: unknown, field: string): void {
   if (typeof value !== 'string' || value === '') return;
@@ -134,7 +134,9 @@ export class AuthService {
     input: { username: string; password: string },
     meta: RequestMeta = {},
   ): Promise<{ token: string; username: string }> {
-    const username = input.username.trim();
+    // 输入长度上限：防止未认证请求用超长字符串消耗 HMAC/bcrypt CPU
+    const username = (typeof input.username === 'string' ? input.username : '').trim().slice(0, 64);
+    const password = typeof input.password === 'string' ? input.password.slice(0, 256) : '';
     const ip = meta.ip ?? 'unknown';
 
     // 1) 锁定检查（防暴力破解）
@@ -170,6 +172,19 @@ export class AuthService {
           detail: `连续失败 ${count} 次，锁定 ${LOCK_MINUTES} 分钟`,
         });
         throw new AuthError('ACCOUNT_LOCKED_FRESH', { count, minutes: LOCK_MINUTES }, 429);
+      }
+      // 分布式爆破兜底：轮换 IP 时单 (user,ip) 计数到不了 MAX_FAILED，
+      // 但该用户名在所有 IP 上的总失败数达到阈值 → 全局锁定（所有 IP 一起拦）
+      if (await this.db.countFailuresByUsername(username) >= MAX_FAILED * 3) {
+        const until = new Date(Date.now() + LOCK_MINUTES * 60000);
+        await this.db.lockAllAttemptsByUsername(username, until);
+        await this.db.audit('account_locked', {
+          username,
+          ip,
+          userAgent: meta.userAgent,
+          detail: `分布式爆破检测：累计失败达阈值，全局锁定 ${LOCK_MINUTES} 分钟`,
+        });
+        throw new AuthError('ACCOUNT_LOCKED_FRESH', { count: MAX_FAILED * 3, minutes: LOCK_MINUTES }, 429);
       }
       await this.db.audit('login_failure', {
         username,

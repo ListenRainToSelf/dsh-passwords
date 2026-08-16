@@ -247,8 +247,21 @@ export class Database {
     const upd = this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?');
     let changed = false;
     for (const row of rows) {
-      const plain = row.username.startsWith('v1:') ? this.crypto.decrypt(row.username) : row.username;
-      if (!row.username.startsWith('v1:') || !row.username_hash) {
+      const isCipher = row.username.startsWith('v1:');
+      let plain: string | null = null;
+      if (isCipher) {
+        const decrypted = this.crypto.decrypt(row.username);
+        // 解密失败返回 '⟨无法解密⟩' 占位符：跳过该行并告警，
+        // 绝不能把占位符当明文加密写回（否则原始密文被覆盖，数据永久丢失）
+        if (decrypted === '⟨无法解密⟩') {
+          console.error(`[dsh-passwords] 迁移跳过用户 id=${row.id}：username 解密失败（密钥不匹配或数据损坏）`);
+          continue;
+        }
+        plain = decrypted;
+      } else {
+        plain = row.username;
+      }
+      if (!isCipher || !row.username_hash) {
         this.db.exec('BEGIN');
         try {
           upd.run(this.crypto.encrypt(plain!), this.crypto.lookupHash(plain!), row.id);
@@ -277,17 +290,15 @@ export class Database {
     );
     let changed = false;
     for (const row of rows) {
-      const needs = (v: string | null) => v !== null && !v.startsWith('v1:');
-      if (needs(row.username) || needs(row.ip) || needs(row.user_agent) || needs(row.detail)) {
+      const encIfNeeded = (v: string | null) => (v !== null && !v.startsWith('v1:') ? this.crypto.encrypt(v) : v);
+      const username = encIfNeeded(row.username);
+      const ip = encIfNeeded(row.ip);
+      const userAgent = encIfNeeded(row.user_agent);
+      const detail = encIfNeeded(row.detail);
+      if (username !== row.username || ip !== row.ip || userAgent !== row.user_agent || detail !== row.detail) {
         this.db.exec('BEGIN');
         try {
-          upd.run(
-            this.crypto.encrypt(row.username),
-            this.crypto.encrypt(row.ip),
-            this.crypto.encrypt(row.user_agent),
-            this.crypto.encrypt(row.detail),
-            row.id,
-          );
+          upd.run(username, ip, userAgent, detail, row.id);
           this.db.exec('COMMIT');
           changed = true;
         } catch (error) {
@@ -407,9 +418,9 @@ export class Database {
     };
   }
 
-  /** 改名（用户名密文 + 等值索引一起更新） */
+  /** 改名（用户名密文 + 等值索引一起更新；同时 bump credential_version 使旧会话全部失效） */
   updateUsername(id: number, username: string): void {
-    this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?').run(
+    this.stmt('UPDATE users SET username = ?, username_hash = ?, credential_version = credential_version + 1 WHERE id = ?').run(
       this.crypto.encrypt(username),
       this.crypto.lookupHash(username),
       id,
@@ -504,6 +515,22 @@ export class Database {
     return this.getLoginAttempt(username, ip)?.failed_count ?? 1;
   }
 
+  /** 该用户名在所有 IP 上的总失败次数（防分布式爆破：轮换 IP 绕过单 (user,ip) 锁定） */
+  countFailuresByUsername(username: string): number {
+    const row = this.stmt(
+      'SELECT COALESCE(SUM(failed_count), 0) AS n FROM login_attempts WHERE username_hash = ?',
+    ).get(this.crypto.lookupHash(username)) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  /** 锁定该用户名在所有 IP 上的失败记录（分布式爆破兜底） */
+  lockAllAttemptsByUsername(username: string, until: Date): void {
+    this.stmt('UPDATE login_attempts SET locked_until = ? WHERE username_hash = ?').run(
+      until.toISOString(),
+      this.crypto.lookupHash(username),
+    );
+  }
+
   lockLoginAttempt(username: string, ip: string, until: Date): void {
     this.stmt(
       `INSERT INTO login_attempts (username_hash, ip_hash, failed_count, locked_until) VALUES (?, ?, 0, ?)
@@ -593,7 +620,11 @@ export class Database {
     return row ?? null;
   }
 
-  /** 记录活跃时间：从 last_active_at 起累计活跃跨度（30 秒内视为连续活跃） */
+  /**
+   * 记录活跃时间：从 last_active_at 起累计活跃跨度。
+   * 网关 15 秒节流一次 touch；为覆盖节流间隙与网络抖动，单次最多累计 30 秒
+   * （封顶语义：防止页面挂机把时长无限拉长；配合节流，正常连续使用误差很小）。
+   */
   touchUsage(userId: number, day: string, nowIso: string): UsageRow {
     const existing = this.getUsage(userId, day);
     if (!existing) {

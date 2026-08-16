@@ -222,7 +222,9 @@ export function apply(ctx: Context): void {
   let cfg: PlatformConfig;
   try {
     cfg = loadConfig();
-  } catch {
+  } catch (error) {
+    // 配置损坏/缺失：记录日志而不是静默返回（否则 dsh 侧无任何提示，排查困难）
+    console.error('[dsh-passwords] 加载配置失败，插件未激活:', error);
     return;
   }
 
