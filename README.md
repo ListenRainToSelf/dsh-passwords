@@ -4,7 +4,7 @@
 
 给 DeepSeek Harness（dsh）加一层**服务器级网关**，把它从「本地单机工具」升级成能多人远程使用的**多租户平台**。
 
-dsh 自带的网页界面没有登录、没有权限、没有用量控制——放到服务器上，任何拿到地址的人都能用，还会烧你的 API key。dsh-passwords 在 dsh 前面挡一层网关：没登录先看登录页；登录后按账号身份做**权限与配额控制**。
+dsh 自带的网页界面没有登录、没有权限、没有用量控制——放到服务器上，任何拿到地址的人都能用，还会白白消耗你的模型额度。dsh-passwords 在 dsh 前面挡一层网关：没登录先看登录页；登录后按账号身份做**权限与配额控制**。安装只需一条命令，**无需任何额外配置**即可开箱即用。
 
 > **一句话定位：dsh-passwords = 让 dsh 真正变成服务器产品的那一层。** 企业内部分发、API 中转站给客户开子账号、团队共享一台服务器，都是它的目标场景。纯本地单机用 dsh 不需要它；但只要访问地址不是 localhost，先装它。
 
@@ -59,7 +59,7 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制——�
 ### 0. 前置条件（三样）
 
 1. **Node.js 22.5+**：`node -v` 查看（Linux：`curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`；Windows：nodejs.org 下载安装包）
-2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh`，并已配置好你的模型 API key
+2. **dsh 已装好**：`npm install -g @deepseek-ai/dsh`，并已能正常对话（dsh 自身的模型连接配置好即可；本插件不需要任何额外配置）
 3. **git**：Linux 没装就 `apt-get install -y git`；Windows 去 git-scm.com 下载（pnpm 缺了脚本会自动装）
 
 ### 1. 安装（按平台）
@@ -166,7 +166,7 @@ node scripts/start-http.mjs [端口]    # 默认 8080，会弹 y/N 确认
 - **主用户** = 首次配置时创建的那个账号；之后添加的都是**子用户**。
 - 密码要求与登录页一致：至少 12 位，且大写、小写、数字、符号各至少一位。
 
-## 配置速查表（.env）
+## 配置（.env 速查表）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
