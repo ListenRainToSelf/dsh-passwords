@@ -268,17 +268,23 @@ export function isGitRequest(pathname: string): boolean {
  *   - dsh-ssh —— SSH 主机清单/隧道/远程文件：含服务器连接信息（host/port/user/auth/keyReady），
  *     泄露即扩大 SSH 凭据面；
  *   - skin-center —— 皮肤中心（未纳入网关权限模型）；
- *   - modlens —— 模型透镜（未纳入网关权限模型）。
+ *   - modlens —— 模型透镜（未纳入网关权限模型）；
+ *   - dsh-uploads —— 共享上传存储的【列表/删除】（F-12）：枚举全部用户上传文件清单
+ *     与删除他人文件均仅主用户；上传（POST）仍由 allow_upload 门控、下载
+ *     （GET /download）仍由 allowGitDownload 门控，保持原权限语义。
  * 这些端点不在白名单/沙盒/配额模型内，对子用户一律 403（deny-list 兜底）。
  */
-export function isAdminOnlyPluginEndpoint(pathname: string): boolean {
+export function isAdminOnlyPluginEndpoint(method: string, pathname: string): boolean {
   return (
     pathname === '/api/dsh-ssh' ||
     pathname.startsWith('/api/dsh-ssh/') ||
     pathname === '/api/skin-center' ||
     pathname.startsWith('/api/skin-center/') ||
     pathname === '/modlens' ||
-    pathname.startsWith('/modlens/')
+    pathname.startsWith('/modlens/') ||
+    // F-12：仅精确匹配 /api/dsh-uploads（不含 /download 子路径），且只看
+    // GET（列表）/DELETE（删除）；POST 上传由 isUploadRequest 按 allow_upload 判定
+    (pathname === '/api/dsh-uploads' && (method === 'GET' || method === 'DELETE'))
   );
 }
 

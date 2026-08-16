@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   hourly_token_limit INTEGER,                       -- NULL = 不限
   daily_minutes_limit INTEGER,                      -- NULL = 不限
   allow_upload       INTEGER NOT NULL DEFAULT 1,
-  allow_git_download INTEGER NOT NULL DEFAULT 1,
+  allow_git_download INTEGER NOT NULL DEFAULT 0,
   banned             INTEGER NOT NULL DEFAULT 0,
   sandbox_mode       TEXT,                          -- NULL = 不更改；read-only/workspace-write/danger-full-access
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))

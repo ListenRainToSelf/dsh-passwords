@@ -568,7 +568,9 @@ export function createGatewayServer(
         hourly_token_limit: null,
         daily_minutes_limit: null,
         allow_upload: true,
-        allow_git_download: true,
+        // F-12 残余：新子用户默认禁 git 下载（含 dsh-uploads/download 等外带通道），
+        // 主用户需要时按需开启；已有权限行的子用户不受影响
+        allow_git_download: false,
         banned: false,
         sandbox_mode: null,
         updated_at: '',
@@ -1010,23 +1012,48 @@ export function createGatewayServer(
   // F-03 补强：WHATWG URL 会折叠 %2e 但【不解码 %2f】，导致 /gateway/..%2fapi/…
   // 在门卫眼里仍以 /gateway/ 开头而被放行，上游解码 %2f 后路径变成 /gateway/../api/…
   // （不匹配 dsh 任何路由 → SPA fallback 200，未认证泄露应用外壳）。
-  // 这里对 pathname 先 percent-decode 再二次归一化：%2f 还原成 /、%2e 还原成 .，
-  // 之后的 ../ 会被第二次 new URL 归一化折叠，前缀判定与实际解码路径一致。
-  function normalizedDecodedPath(raw: string): string {
-    try {
-      const decoded = decodeURIComponent(raw);
-      return new URL(decoded, 'http://localhost').pathname;
-    } catch {
-      // 畸形百分号编码：保持原样（后续认证自然失败，不抛 URIError 500）
-      return raw;
+  // 修复要点（复检定位）：
+  //   1. 必须从【原始 req.url】取路径——第一次 new URL 归一化时
+  //      /gateway//../ 的空段会把 .. 吞掉（WHATWG 语义），再用归一化后的
+  //      pathname 二次处理就太晚了；
+  //   2. 迭代解码（最多 3 轮）：覆盖 %2f、%252f（双重编码）等；
+  //   3. 解码后压平重复斜杠再 new URL 归一化，使 ../ 能正确折叠。
+  // 绝对形式 request-target（http://host/...）先解析出 host 再取 pathname。
+  function gatePathOf(reqUrl: string): string {
+    let rawPath: string;
+    if (/^https?:\/\//i.test(reqUrl)) {
+      try {
+        rawPath = new URL(reqUrl).pathname;
+      } catch {
+        rawPath = reqUrl;
+      }
+    } else {
+      rawPath = reqUrl.split('?')[0];
     }
+    return normalizeDecodedPath(rawPath);
+  }
+
+  /** 迭代解码（最多 3 轮）+ 压平重复斜杠 + WHATWG 归一化；畸形编码保持原样 */
+  function normalizeDecodedPath(rawPath: string): string {
+    let decoded = rawPath;
+    for (let i = 0; i < 3; i++) {
+      let next: string;
+      try {
+        next = decodeURIComponent(decoded);
+      } catch {
+        break; // 畸形百分号编码：保留当前值
+      }
+      if (next === decoded) break; // 无更多可解
+      decoded = next;
+    }
+    return new URL(decoded.replace(/\/+/g, '/'), 'http://localhost').pathname;
   }
 
   app.use((req, res, next) => {
     try {
-      const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      // F-03：解码后再次归一化的路径用于前缀判定（防 %2f 绕过）
-      const gatePath = normalizedDecodedPath(parsed.pathname);
+      // F-03：从【原始 req.url】迭代解码 + 压平斜杠 + 归一化后做前缀判定
+      // （不能先用 new URL(parsed.pathname)——第一次归一化会把 //../ 的空段吞掉）
+      const gatePath = gatePathOf(req.url ?? '/');
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀（未注册子路径由
       // 后续中间件处理，避免透传到上游 dsh）
       if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) return next();
@@ -1042,6 +1069,9 @@ export function createGatewayServer(
         res.redirect(302, `/gateway/login?next=${encodeURIComponent(req.originalUrl)}`);
         return;
       }
+      // 权限判定的 pathname：仍用 WHATWG 归一化（. / .. 已折叠），供下方
+      // isUploadRequest / isGitRequest / 白名单等匹配；gate 前缀判定不受影响
+      const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
         const lang = langOf(req);
@@ -1049,9 +1079,9 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.banned')));
           return;
         }
-        // F-09：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens 等）
-        // 不在网关权限模型内，对子用户一律 403（仅主用户可访问），防绕过白名单/沙盒/配额
-        if (isAdminOnlyPluginEndpoint(parsed.pathname)) {
+        // F-09/F-12：第三方插件“运维面”端点（dsh-ssh 主机清单/隧道、skin-center、modlens、
+        // dsh-uploads 列表/删除等）不在网关权限模型内，对子用户一律 403（仅主用户可访问）
+        if (isAdminOnlyPluginEndpoint(req.method, parsed.pathname)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.adminOnly')));
           return;
         }
@@ -1136,7 +1166,7 @@ export function createGatewayServer(
         // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
         // F-03：与门卫同口径——pathname 解码后再归一化，编码变体（%2f/%2e）
         // 转发为等价规范路径，避免上游按自身规则解码导致路径语义漂移
-        path: normalizedDecodedPath(parsedUrl.pathname) + parsedUrl.search,
+        path: normalizeDecodedPath(parsedUrl.pathname) + parsedUrl.search,
         method: req.method,
         headers,
         agent: upstreamAgent,
@@ -1518,6 +1548,14 @@ export function createGatewayServer(
       )
     : http.createServer(app);
 
+  // slowloris 加固（第四轮 P-note）：显式请求超时 + 并发连接上限
+  //   - headersTimeout 20s：半开头部（慢速发头）更快被切断（Node 默认 60s）
+  //   - requestTimeout 60s：完整请求体超时（Node 默认 300s；仅影响收包，不影响 SSE/长连接）
+  //   - maxConnections 512：防千级慢连接耗尽文件句柄（100 并发压力测试实测无压力）
+  server.headersTimeout = 20_000;
+  server.requestTimeout = 60_000;
+  server.maxConnections = 512;
+
   // ── WebSocket 升级代理（dsh 前端依赖 WS 通信） ──────────────
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -1585,7 +1623,7 @@ export function createRedirectServer(
   challengeStore?: Map<string, string>,
 ): http.Server | null {
   if (config.gateway.tls === null || config.gateway.redirectPort === null) return null;
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     // ACME HTTP-01 挑战应答：优先于跳转处理（Let's Encrypt 校验走这里）
     if (challengeStore) {
       const pathname = (() => {
@@ -1637,4 +1675,9 @@ export function createRedirectServer(
     });
     res.end();
   });
+  // slowloris 加固：80 跳转端口同样设显式超时 + 连接上限（ACME 挑战不受影响）
+  server.headersTimeout = 20_000;
+  server.requestTimeout = 60_000;
+  server.maxConnections = 256;
+  return server;
 }
