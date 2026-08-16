@@ -40,6 +40,7 @@ import {
   permissionPresetFromCommand,
   presetFromSettingsMutate,
   forceRejectApproval,
+  clampSessionHistorySandbox,
   SANDBOX_RANK,
   todayLocal,
 } from './permissions.js';
@@ -1176,6 +1177,45 @@ export function createGatewayServer(
               const parsed = JSON.parse(body.toString('utf8'));
               const filtered = filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'cwd');
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              delete respHeaders['content-length'];
+              delete respHeaders['content-encoding'];
+              respHeaders['content-length'] = String(out.length);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(out);
+            } catch {
+              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(Buffer.concat(chunks));
+            }
+          });
+          upstreamRes.on('error', () => res.destroy());
+          return;
+        }
+
+        // ── session.history 响应：受限子用户的沙盒降级（防共享会话提权） ──
+        // 主用户把会话设为 danger-full-access 后共享给子用户，子用户打开会话时
+        // 会话 log 里的 permission/preset 就是 full access——不拦截就直接继承提权。
+        // 这里把超过子用户授权级别的 preset/mode 统一降级。
+        if (
+          reqAs.dshpwPerms !== undefined &&
+          reqAs.dshpwPerms.sandbox_mode !== null &&
+          req.method === 'POST' &&
+          /^\/api\/session[.\/]history$/.test(parsedUrl.pathname)
+        ) {
+          const chunks: Buffer[] = [];
+          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
+          upstreamRes.on('end', () => {
+            try {
+              let body = Buffer.concat(chunks);
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              if (enc.includes('gzip')) body = zlib.gunzipSync(body);
+              const parsed = JSON.parse(body.toString('utf8'));
+              const changed = clampSessionHistorySandbox(
+                parsed,
+                reqAs.dshpwPerms!.sandbox_mode as 'read-only' | 'workspace-write' | 'danger-full-access',
+              );
+              const out = Buffer.from(JSON.stringify(parsed), 'utf8');
               const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
               delete respHeaders['content-length'];
               delete respHeaders['content-encoding'];

@@ -198,6 +198,62 @@ export function forceRejectApproval(value: unknown, depth = 0): boolean {
   return changed;
 }
 
+/**
+ * 会话历史沙盒降级：子用户打开共享会话时，会话 log 里可能已带更高权限的
+ * permission/preset 与 sandbox/mode（主用户设置过 danger-full-access）——
+ * 直接继承会导致子用户无操作即提权。这里把超过授权级别的 preset/mode 统一
+ * 降级为子用户授权级别，并同步修正 projections.values.permissions.currentValue。
+ * 返回是否有实际改动。
+ */
+export function clampSessionHistorySandbox(value: unknown, allowedMode: SandboxMode | null, depth = 0): boolean {
+  if (depth > 8 || value === null || typeof value !== 'object') return false;
+  if (allowedMode === null) return false;
+  const obj = value as Record<string, unknown>;
+  let changed = false;
+  const allowedRank = SANDBOX_RANK[allowedMode];
+
+  // permission/preset 事件：{ type: 'permission/preset', data: { preset } }
+  if (obj.type === 'permission/preset' && obj.data && typeof obj.data === 'object') {
+    const data = obj.data as Record<string, unknown>;
+    const preset = data.preset;
+    if (typeof preset === 'string' && SANDBOX_RANK[preset as SandboxMode] !== undefined) {
+      const presetRank = SANDBOX_RANK[preset as SandboxMode];
+      if (presetRank > allowedRank) {
+        data.preset = allowedMode;
+        changed = true;
+      }
+    }
+  }
+  // sandbox/mode 事件：{ type: 'sandbox/mode', data: { mode } }
+  if (obj.type === 'sandbox/mode' && obj.data && typeof obj.data === 'object') {
+    const data = obj.data as Record<string, unknown>;
+    const mode = data.mode;
+    if (typeof mode === 'string' && SANDBOX_RANK[mode as SandboxMode] !== undefined) {
+      const modeRank = SANDBOX_RANK[mode as SandboxMode];
+      if (modeRank > allowedRank) {
+        data.mode = allowedMode;
+        changed = true;
+      }
+    }
+  }
+  // projections.values.permissions.currentValue：客户端投影显示的当前 preset
+  if (obj.currentValue === 'danger-full-access' || obj.currentValue === 'workspace-write' || obj.currentValue === 'read-only') {
+    const curRank = SANDBOX_RANK[obj.currentValue as SandboxMode];
+    if (curRank > allowedRank) {
+      obj.currentValue = allowedMode;
+      changed = true;
+    }
+  }
+  // 递归（同时覆盖 events[].event 和 projections.values 两层结构）
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (v !== null && typeof v === 'object') {
+      if (clampSessionHistorySandbox(v, allowedMode, depth + 1)) changed = true;
+    }
+  }
+  return changed;
+}
+
 // ── 上传 / git 拦截的路径判定（纯路径 + 方法，不读请求体） ──────────────
 
 /** 上传相关端点：dsh-file-uploads 插件 + dsh-file-path 的"复制到工作区"桥 + dsh-ssh 远程上传 */
