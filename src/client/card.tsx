@@ -131,6 +131,9 @@ function Chevron(props: { open: boolean }) {
 
 export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const t = props.t;
+  // errText 需要接收动态 key（err.<code>），而 dshpw 词典 t 的 key 是受限联合类型：
+  // 这里包一层宽松签名适配器（运行时行为不变）
+  const trErr = (key: string, params?: Record<string, string | number>) => t(key as never, params);
   // 折叠状态（与官方 PluginCard 一致：默认收起，展开状态为卡片本地状态）
   const [open, setOpen] = useState(false);
 
@@ -142,6 +145,8 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   // 改密表单
   const [pwTarget, setPwTarget] = useState('');
+  // F-06：自助改密需验证当前密码（主用户重置他人时无需）
+  const [pwCurrent, setPwCurrent] = useState('');
   const [pwNew, setPwNew] = useState('');
   const [pwConfirm, setPwConfirm] = useState('');
   // 改名表单
@@ -186,7 +191,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
             .catch(() => setOverview(null));
         }
       })
-      .catch((e) => setError(errText(e, t)));
+      .catch((e) => setError(errText(e, trErr)));
     api<{ status: PatchState | null }>('/api/dsh-passwords/patch/status')
       .then((r) => setPatchState(r.status))
       .catch(() => setPatchState(null));
@@ -211,7 +216,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       setNotice(okMessage);
       refresh();
     } catch (e) {
-      setError(errText(e, t));
+      setError(errText(e, trErr));
     } finally {
       setBusy(false);
     }
@@ -231,8 +236,17 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
   const changePassword = () => {
     if (pwNew !== pwConfirm) return setError(t('pwMismatch'));
     if (!PASSWORD_RE.test(pwNew)) return setError(t('pwPolicy'));
+    const target = pwTarget || me;
+    const isSelf = target === me;
+    // F-06：改自己必须填当前密码（服务端也会校验，这里前端先拦空值）
+    if (isSelf && pwCurrent === '') return setError(t('needCurrentPw'));
     void run(
-      () => api('/api/dsh-passwords/password', { target: pwTarget || me, password: pwNew }),
+      () =>
+        api('/api/dsh-passwords/password', {
+          target,
+          password: pwNew,
+          ...(isSelf ? { currentPassword: pwCurrent } : {}),
+        }),
       t('pwChanged'),
     );
   };
@@ -365,6 +379,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
       h('span', { className: 'dshpw-label' }, t('chgPw')),
       isAdmin && h('span', { className: 'dshpw-hint' }, t('targetUser')),
       targetSelect(pwTarget, setPwTarget),
+      // F-06：改自己需先验证当前密码（管理员改他人无需）
+      (pwTarget === '' || pwTarget === me) &&
+        h('input', {
+          className: 'dshpw-input',
+          type: 'password',
+          autoComplete: 'current-password',
+          placeholder: t('currentPwPh'),
+          value: pwCurrent,
+          onChange: (e: { target: { value: string } }) => setPwCurrent(e.target.value),
+        }),
       h('input', {
         className: 'dshpw-input',
         type: 'password',

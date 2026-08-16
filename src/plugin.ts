@@ -231,6 +231,9 @@ export function apply(ctx: Context): void {
   // 未配置 .env（SETUP_KEY 为空）时不初始化数据库，用户管理路由返回 503 提示
   const configured =
     cfg.setupKey !== '' && cfg.setupKey !== 'change-me-to-a-strong-random-key';
+  /** patch/reload 冷却（10 分钟一次，防认证后横向 DoS） */
+  const PATCH_RELOAD_COOLDOWN_MS = 10 * 60 * 1000;
+  let lastPatchReload = 0;
   let db: Database | null = null;
   let auth: AuthService | null = null;
   if (configured) {
@@ -310,7 +313,10 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
-        const users: UserListRow[] = db!.listUsers();
+        // F-05：全量用户列表仅主用户可见；子用户只见自己 + 有消息往来的用户
+        // （避免多租户场景下的用户名目录泄露给低权限账号）
+        const users: UserListRow[] =
+          caller.role === 'admin' ? db!.listUsers() : [db!.getUserById(caller.userId)!, ...db!.listMessageContacts(caller.userId)];
         writeJson(res, 200, {
           ok: true,
           me: { username: caller.username, role: caller.role },
@@ -328,7 +334,9 @@ export function apply(ctx: Context): void {
           const body = await readJsonBody(req);
           const target = typeof body.target === 'string' && body.target !== '' ? body.target : caller.username;
           const password = typeof body.password === 'string' ? body.password : '';
-          await auth!.changePassword(caller, target, password, metaOf(req));
+          // F-06：自助改密（target 为自己）需携带当前密码，服务端 bcrypt 校验
+          const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : undefined;
+          await auth!.changePassword(caller, target, password, metaOf(req), currentPassword);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           failJson(res, error);
@@ -409,7 +417,21 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
-        // 任何登录用户都可触发（补丁强制启用，重载只是重新应用 + 重启 dsh 网页服务）
+        // 仅主用户可触发 + 冷却（10 分钟一次）：防止任意登录用户（含只读沙盒子用户）
+        // 反复重启 dsh 网页服务造成认证后横向 DoS
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
+        const now = Date.now();
+        const last = lastPatchReload;
+        if (now - last < PATCH_RELOAD_COOLDOWN_MS) {
+          const remainMin = Math.ceil((PATCH_RELOAD_COOLDOWN_MS - (now - last)) / 60000);
+          writeJson(res, 429, { ok: false, code: 'RATE_LIMITED', error: `补丁重载过于频繁，请 ${remainMin} 分钟后再试` });
+          return;
+        }
+        lastPatchReload = now;
+        // 补丁强制启用，重载只是重新应用 + 重启 dsh 网页服务
         notifyGateway(cfg);
         writeJson(res, 202, { ok: true, message: '补丁重载中：dsh 网页服务即将重启（约 3-5 秒）' });
       },

@@ -16,6 +16,8 @@ const BCRYPT_ROUNDS = 10;
 const TOKEN_TTL = '12h';
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
+/** 锁定时长随失败轮次退避（第 N 轮锁定 N 分钟，封顶 60）：降低攻击者循环锁死账号的可持续性 */
+const LOCK_STEPS = [1, 5, 15, 60] as const;
 /** 时序均衡用空跑哈希：用户不存在时也执行一次 bcrypt，抹平“快=不存在”的枚举差异 */
 const DUMMY_HASH = bcrypt.hashSync('dsh-passwords-timing-equalizer', BCRYPT_ROUNDS);
 
@@ -162,20 +164,26 @@ export class AuthService {
     }
     if (!user || !valid) {
       const count = await this.db.recordLoginFailure(username, ip);
+      // 锁定时长随失败轮次退避（round 0 → 1 分钟，1 → 5，2 → 15，3+ → 60 封顶）
+      const round = Math.max(0, Math.floor((count - 1) / MAX_FAILED));
+      const lockMinutes = LOCK_STEPS[Math.min(round, LOCK_STEPS.length - 1)];
       if (count >= MAX_FAILED) {
-        const until = new Date(Date.now() + LOCK_MINUTES * 60000);
+        const until = new Date(Date.now() + lockMinutes * 60000);
         await this.db.lockLoginAttempt(username, ip, until);
         await this.db.audit('account_locked', {
           username,
           ip,
           userAgent: meta.userAgent,
-          detail: `连续失败 ${count} 次，锁定 ${LOCK_MINUTES} 分钟`,
+          detail: `连续失败 ${count} 次，锁定 ${lockMinutes} 分钟（退避第 ${round} 轮）`,
         });
-        throw new AuthError('ACCOUNT_LOCKED_FRESH', { count, minutes: LOCK_MINUTES }, 429);
+        throw new AuthError('ACCOUNT_LOCKED_FRESH', { count, minutes: lockMinutes }, 429);
       }
-      // 分布式爆破兜底：轮换 IP 时单 (user,ip) 计数到不了 MAX_FAILED，
-      // 但该用户名在所有 IP 上的总失败数达到阈值 → 全局锁定（所有 IP 一起拦）
-      if (await this.db.countFailuresByUsername(username) >= MAX_FAILED * 3) {
+      // 分布式爆破兑底：轮换 IP 时单 (user,ip) 计数到不了 MAX_FAILED，
+      // 但该用户名在所有 IP 上的总失败数达到阈值 → 全局锁定（所有 IP 一起拦）。
+      // 主用户（admin 角色）不参与全局锁：防止攻击者用多 IP 轮换把管理员
+      // 永久锁死（账号级 DoS）。主用户的 (user,ip) 级锁定仍生效。
+      const isAdmin = user !== null && user.role === 'admin';
+      if (!isAdmin && (await this.db.countFailuresByUsername(username)) >= MAX_FAILED * 3) {
         const until = new Date(Date.now() + LOCK_MINUTES * 60000);
         await this.db.lockAllAttemptsByUsername(username, until);
         await this.db.audit('account_locked', {
@@ -221,17 +229,27 @@ export class AuthService {
 
   // ── 用户管理（dsh 设置页卡片调用） ────────────────────────────
 
-  /** 改密：本人可改自己；主用户可重置任何人。改后旧会话全部失效。 */
+  /** 改密：本人可改自己（需提供当前密码）；主用户可重置任何人（无需当前密码）。改后旧会话全部失效。 */
   async changePassword(
     caller: AuthedUser,
     target: string,
     newPassword: string,
     meta: RequestMeta = {},
+    currentPassword?: string,
   ): Promise<void> {
     const targetUser = await this.db.getUserByUsername(target.trim());
     if (!targetUser) throw new AuthError('NO_SUCH_USER', {}, 404);
-    if (caller.role !== 'admin' && caller.username !== targetUser.username) {
+    const isSelf = caller.username === targetUser.username;
+    if (caller.role !== 'admin' && !isSelf) {
       throw new AuthError('FORBIDDEN_PASSWORD', {}, 403);
+    }
+    // F-06：自助改密必须验证当前密码（防会话劫持后改密“账号接管持久化”）；
+    // 主用户重置他人密码属于高权限操作，不需要当前密码（主用户凭据已是最强认证）
+    if (isSelf) {
+      const current = typeof currentPassword === 'string' ? currentPassword : '';
+      if (current === '' || !(await bcrypt.compare(current, targetUser.password_hash))) {
+        throw new AuthError('INVALID_CURRENT_PASSWORD', {}, 401);
+      }
     }
     const password = assertPassword(newPassword);
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -240,10 +258,7 @@ export class AuthService {
       username: targetUser.username,
       ip: meta.ip,
       userAgent: meta.userAgent,
-      detail:
-        caller.username === targetUser.username
-          ? '用户自助修改密码'
-          : `由主用户 ${caller.username} 重置`,
+      detail: isSelf ? '用户自助修改密码（已验证当前密码）' : `由主用户 ${caller.username} 重置`,
     });
   }
 

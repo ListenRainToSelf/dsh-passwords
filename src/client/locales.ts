@@ -24,6 +24,8 @@ export const zh = {
   // 修改密码
   chgPw: '修改密码',
   targetUser: '目标用户',
+  currentPwPh: '当前密码',
+  needCurrentPw: '请先输入当前密码',
   newPwPh: '新密码（至少 12 位，含大小写、数字、符号）',
   confirmPwPh: '再次输入新密码',
   savePw: '保存密码',
@@ -128,6 +130,8 @@ export const en: Record<keyof typeof zh, string> = {
   reloading: 'Reloading: the web service will restart and the page will refresh automatically',
   chgPw: 'Change password',
   targetUser: 'Target user',
+  currentPwPh: 'Current password',
+  needCurrentPw: 'Enter your current password first',
   newPwPh: 'New password (12+ chars with uppercase, lowercase, digits and symbols)',
   confirmPwPh: 'Confirm new password',
   savePw: 'Save password',

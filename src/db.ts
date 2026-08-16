@@ -398,6 +398,26 @@ export class Database {
     }));
   }
 
+  /**
+   * 与某用户有消息往来的其他用户（F-05：子用户的 state 接口只暴露这些人，
+   * 避免全量用户目录泄露给低权限账号）。含主动/被动双向：我是发件人或收件人。
+   */
+  listMessageContacts(userId: number): UserListRow[] {
+    const rows = this.stmt(
+      `SELECT DISTINCT u.id, u.username, u.role, u.created_at, u.last_login_at
+       FROM messages m
+       JOIN users u ON u.id = m.sender_id OR u.id = m.recipient_id
+       WHERE (m.sender_id = ? OR m.recipient_id = ?) AND u.id != ?`,
+    ).all(userId, userId, userId) as (Omit<UserListRow, 'username'> & { username: string })[];
+    return rows.map((row) => ({
+      id: row.id,
+      username: this.crypto.decrypt(row.username) ?? '',
+      role: row.role === 'admin' ? 'admin' : 'user',
+      created_at: row.created_at,
+      last_login_at: row.last_login_at,
+    }));
+  }
+
   countUsers(): number {
     const row = this.stmt('SELECT COUNT(*) AS n FROM users').get() as { n: number };
     return Number(row?.n ?? 0);

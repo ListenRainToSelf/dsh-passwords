@@ -514,6 +514,25 @@ export function createGatewayServer(
   >();
   const SESSION_CACHE_TTL_MS = 30_000;
 
+  // F-04：登出吊销（内存黑名单）。JWT 无状态，登出只能靠网关侧短期黑名单
+  // 使已登出 token 立即失效（TTL 与 JWT 有效期一致，到期自动清理）。
+  // 改密/改名已有 credential_version 机制使旧 token 失效，此处只补登出路径。
+  const revokedTokens = new Map<string, number>();
+  const TOKEN_TTL_MS = 12 * 3600 * 1000;
+
+  function revokeToken(token: string): void {
+    revokedTokens.set(token, Date.now() + TOKEN_TTL_MS);
+    sessionCache.delete(token);
+  }
+
+  function isTokenRevoked(token: string): boolean {
+    const expiresAt = revokedTokens.get(token);
+    if (expiresAt === undefined) return false;
+    if (expiresAt > Date.now()) return true;
+    revokedTokens.delete(token);
+    return false;
+  }
+
   function sessionOf(req: Request): { userId: number; username: string } | null {
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     if (!token) return null;
@@ -525,6 +544,8 @@ export function createGatewayServer(
     }
     try {
       const user = auth.verifyToken(token);
+      // F-04：登出后的 token 立即拒绝（不重新进入缓存）
+      if (isTokenRevoked(token)) return null;
       // 用户被删除/重置/改密后旧会话必须失效（缓存有效期 30 秒内生效）
       const row = db.getUserByUsername(user.username);
       if (row === null) return null;
@@ -720,7 +741,11 @@ export function createGatewayServer(
   });
 
   // ── 登出 ─────────────────────────────────────────────────────
-  app.get('/gateway/logout', (_req, res) => {
+  app.get('/gateway/logout', (req, res) => {
+    // F-04：服务端吊销——登出的 token 立即失效（黑名单 12h），
+    // 即使 Cookie 已被攻击者复制，该 token 也无法再通过认证门卫
+    const token = readCookie(req.headers.cookie, COOKIE_NAME);
+    if (token) revokeToken(token);
     res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0`);
     res.redirect(302, '/gateway/login');
   });
@@ -972,12 +997,30 @@ export function createGatewayServer(
   // 路径先用 WHATWG URL 规范化（. / .. / %2e%2e 均被归一），再做前缀判断——
   // 否则 /gateway/../api/xxx 会绕过前缀检查直达上游（dsh 侧 new URL 同样
   // 会归一化该路径，等于未认证调用任意 RPC）。解析失败一律按未认证处理，绝不 500。
+  //
+  // F-03 补强：WHATWG URL 会折叠 %2e 但【不解码 %2f】，导致 /gateway/..%2fapi/…
+  // 在门卫眼里仍以 /gateway/ 开头而被放行，上游解码 %2f 后路径变成 /gateway/../api/…
+  // （不匹配 dsh 任何路由 → SPA fallback 200，未认证泄露应用外壳）。
+  // 这里对 pathname 先 percent-decode 再二次归一化：%2f 还原成 /、%2e 还原成 .，
+  // 之后的 ../ 会被第二次 new URL 归一化折叠，前缀判定与实际解码路径一致。
+  function normalizedDecodedPath(raw: string): string {
+    try {
+      const decoded = decodeURIComponent(raw);
+      return new URL(decoded, 'http://localhost').pathname;
+    } catch {
+      // 畸形百分号编码：保持原样（后续认证自然失败，不抛 URIError 500）
+      return raw;
+    }
+  }
+
   app.use((req, res, next) => {
     try {
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      // F-03：解码后再次归一化的路径用于前缀判定（防 %2f 绕过）
+      const gatePath = normalizedDecodedPath(parsed.pathname);
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀（未注册子路径由
       // 后续中间件处理，避免透传到上游 dsh）
-      if (parsed.pathname === '/gateway' || parsed.pathname.startsWith('/gateway/')) return next();
+      if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) return next();
       const user = sessionOf(req);
       if (!user) {
         // 重定向兼容层：记录原始 URL，登录后跳回
@@ -1076,7 +1119,9 @@ export function createGatewayServer(
         hostname: upstreamHost,
         port: upstreamPort,
         // 规范化路径转发（与 dsh 的 new URL 解析行为一致，杜绝 ../ 混入上游）
-        path: parsedUrl.pathname + parsedUrl.search,
+        // F-03：与门卫同口径——pathname 解码后再归一化，编码变体（%2f/%2e）
+        // 转发为等价规范路径，避免上游按自身规则解码导致路径语义漂移
+        path: normalizedDecodedPath(parsedUrl.pathname) + parsedUrl.search,
         method: req.method,
         headers,
         agent: upstreamAgent,
