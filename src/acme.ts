@@ -7,17 +7,10 @@
 //   account.key.pem   账户密钥（P-256，复用于续期）
 //   cert.key.pem      证书私钥（P-256，TLS 用）
 //   fullchain.pem     证书链（叶子 + 中间证书）
-import {
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  createSign,
-  generateKeyPairSync,
-  X509Certificate,
-  type KeyObject,
-} from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, X509Certificate, type KeyObject } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { isPublicIp } from './config.js';
 
 const DIRECTORIES = {
   production: 'https://acme-v02.api.letsencrypt.org/directory',
@@ -336,13 +329,6 @@ export function certExpiryMs(fullchainPath: string): number | null {
   } catch {
     return null;
   }
-}
-
-/** 公网 IPv4 判定（排除私网/环回/链路本地/CGNAT 段） */
-export function isPublicIp(value: string): boolean {
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
-  if (!value.split('.').every((part) => Number(part) <= 255)) return false;
-  return !/^(0\.|10\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|127\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|198\.18\.|198\.51\.100\.|203\.0\.113\.)/.test(value);
 }
 
 /** 零配置兜底：探测本机公网 IP（外部服务，5 秒超时，失败返回 null） */

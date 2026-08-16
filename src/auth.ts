@@ -156,9 +156,9 @@ export class AuthService {
     const user = await this.db.getUserByUsername(username);
     let valid = false;
     if (user) {
-      valid = await bcrypt.compare(input.password, user.password_hash);
+      valid = await bcrypt.compare(password, user.password_hash);
     } else {
-      await bcrypt.compare(input.password, DUMMY_HASH); // 空跑一次，抹平时序差异
+      await bcrypt.compare(password, DUMMY_HASH); // 空跑一次，抹平时序差异
     }
     if (!user || !valid) {
       const count = await this.db.recordLoginFailure(username, ip);
@@ -216,16 +216,6 @@ export class AuthService {
       return { userId: Number(payload.sub), username: String(payload.username), cv };
     } catch {
       throw new AuthError('INVALID_TOKEN', {}, 401);
-    }
-  }
-
-  /** MCP 侧登录（agent 调用）：用户名+密码 → 认证结果（同样受限流+审计保护） */
-  async mcpLogin(input: { username: string; password: string }): Promise<{ ok: boolean }> {
-    try {
-      await this.login(input, { ip: 'stdio', userAgent: 'mcp-agent' });
-      return { ok: true };
-    } catch {
-      return { ok: false };
     }
   }
 
