@@ -11,26 +11,6 @@
 // 说明：folder / upload / git 的网关层拦截是"尽力而为"（基于 dsh 的 HTTP API
 // 路径与请求体字段）。主用户账号不受任何限制。
 
-export interface UserPermissions {
-  allowedFolders: string[];
-  hourlyTokenLimit: number | null;
-  dailyMinutesLimit: number | null;
-  allowUpload: boolean;
-  allowGitDownload: boolean;
-  banned: boolean;
-}
-
-export function defaultPermissions(): UserPermissions {
-  return {
-    allowedFolders: [],
-    hourlyTokenLimit: null,
-    dailyMinutesLimit: null,
-    allowUpload: true,
-    allowGitDownload: true,
-    banned: false,
-  };
-}
-
 /** 规范化路径：反斜杠转正斜杠、去尾部斜杠、Windows 盘符统一小写（大小写不敏感比较） */
 function normalizePath(p: string): string {
   let n = p.replace(/\\/g, '/').replace(/\/+$/, '');

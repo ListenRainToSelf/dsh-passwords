@@ -86,7 +86,6 @@ export const zh = {
   usageTokens: '本小时 token',
   // 通用
   opFailed: '操作失败',
-  httpFailed: '请求失败 (HTTP {status})',
   // 服务端错误码（与 i18n.ts 的 err.* 保持一致）
   'err.ALREADY_INITIALIZED': '平台已初始化，不能重复配置',
   'err.INVALID_SETUP_KEY': '预设密钥不正确',
@@ -188,7 +187,6 @@ export const en: Record<keyof typeof zh, string> = {
   usageTime: 'Today usage',
   usageTokens: 'Hourly tokens',
   opFailed: 'Operation failed',
-  httpFailed: 'Request failed (HTTP {status})',
   'err.ALREADY_INITIALIZED': 'The platform is already initialized and cannot be set up again',
   'err.INVALID_SETUP_KEY': 'Incorrect setup key',
   'err.INVALID_USERNAME': 'Username must be 3-32 letters, digits, underscores or hyphens',
