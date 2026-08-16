@@ -39,11 +39,23 @@ function normalizePath(p: string): string {
 }
 
 /**
- * path 是否命中 allowed 白名单（相等或为某白名单目录的子路径；空白名单 = 全部允许）。
- * 白名单条目为 `/`（根）时视为全盘允许。
+ * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
+ * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
+ */
+export const DENY_ALL_WORKSPACES = '__deny__';
+
+/** 子用户是否受工作区约束（白名单非空，含"禁止所有"哨兵或真实路径） */
+export function isWorkspaceRestricted(allowedFolders: string[]): boolean {
+  return allowedFolders.length > 0;
+}
+
+/**
+ * path 是否命中 allowed 白名单（相等或为某白名单目录的子路径；空白名单 = 全部允许；
+ * 含 DENY_ALL_WORKSPACES 哨兵 = 禁止所有）。白名单条目为 `/`（根）时视为全盘允许。
  */
 export function folderAllowed(path: string, allowedFolders: string[]): boolean {
   if (allowedFolders.length === 0) return true;
+  if (allowedFolders.includes(DENY_ALL_WORKSPACES)) return false;
   const p = normalizePath(path);
   return allowedFolders.some((entry) => {
     const base = normalizePath(entry);
@@ -256,9 +268,9 @@ export function aionuiRootFrom(
   return null;
 }
 
-/** 工作区创建/删除/重命名等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
+/** 工作区创建/删除/重命名/归档/移动等写操作（受限子用户直接禁止，防止绕过文件夹白名单） */
 export function isWorkspaceWrite(pathname: string): boolean {
-  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move)/.test(pathname);
+  return /^\/api\/workspace[.\/](add|create|import|remove|delete|rename|update|move|archiveSession|insertBefore|insertSessionBefore|materialize|adopt)/.test(pathname);
 }
 
 // ── 工作区/会话文件夹限制：需要读 JSON 请求体 ──────────────────────────

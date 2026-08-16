@@ -19,6 +19,7 @@ import { AuthService, AuthError, type RequestMeta } from './auth.js';
 import { Database, type UserPermissionsRow, type MessageRow } from './db.js';
 import {
   folderAllowed,
+  isWorkspaceRestricted,
   isUploadRequest,
   isGitRequest,
   isAionuiFileRead,
@@ -853,6 +854,12 @@ export function createGatewayServer(
       rawSandbox === 'read-only' || rawSandbox === 'workspace-write' || rawSandbox === 'danger-full-access'
         ? rawSandbox
         : null;
+    // 配额语义："改配额 = 重新给额度"——当 token/时长上限发生变化时
+    // 重置该子用户已累计的用量（不同子用户每时段用量不同，改上限应重新计）。
+    // 只改文件夹/上传/封禁等非配额字段时不重置（避免误清用量）。
+    const prevPerms = effectivePermissions(userId);
+    const quotaChanged =
+      prevPerms.hourly_token_limit !== hourlyTokenLimit || prevPerms.daily_minutes_limit !== dailyMinutesLimit;
     db.setPermissions(userId, {
       allowedFolders,
       hourlyTokenLimit,
@@ -862,6 +869,12 @@ export function createGatewayServer(
       banned,
       sandboxMode,
     });
+    if (quotaChanged) {
+      db.resetUsage(userId);
+      // 清掉内存节流缓存：否则 15 秒节流可能跳过新记录的创建，配额暂时不生效
+      usageThrottle.delete(userId);
+      usageReportThrottle.delete(userId);
+    }
     db.audit('permissions_changed', {
       username: target.username,
       detail: JSON.stringify({
@@ -995,12 +1008,12 @@ export function createGatewayServer(
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.noUpload')));
           return;
         }
-        if (perms.allowed_folders.length > 0 && isWorkspaceWrite(parsed.pathname)) {
+        if (isWorkspaceRestricted(perms.allowed_folders) && isWorkspaceWrite(parsed.pathname)) {
           res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.workspaceDenied')));
           return;
         }
         // aionui-panel 文件树：GET/HEAD 的 root 在 query 里，直接校验白名单（拦截目录浏览/下载）
-        if (perms.allowed_folders.length > 0 && (req.method === 'GET' || req.method === 'HEAD')) {
+        if (isWorkspaceRestricted(perms.allowed_folders) && (req.method === 'GET' || req.method === 'HEAD')) {
           const aionuiRoot = aionuiRootFrom(req.method, parsed.pathname, parsed.searchParams, null);
           if (aionuiRoot !== null && !folderAllowed(aionuiRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
@@ -1125,7 +1138,7 @@ export function createGatewayServer(
               // 先缓存全量 id→path（供 session.create 用 workspaceId 时解析路径）
               collectIdPathPairs(parsed, workspacePathById);
               const restricted =
-                reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.allowed_folders.length > 0;
+                reqAs.dshpwPerms !== undefined && isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders);
               const outBody = restricted
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
@@ -1149,7 +1162,7 @@ export function createGatewayServer(
         // ── session.list 响应过滤：受限子用户只看得到白名单内工作区的会话 ──
         if (
           reqAs.dshpwPerms !== undefined &&
-          reqAs.dshpwPerms.allowed_folders.length > 0 &&
+          isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
           req.method === 'POST' &&
           /^\/api\/session[.\/]list$/.test(parsedUrl.pathname)
         ) {
@@ -1223,7 +1236,7 @@ export function createGatewayServer(
     //   2) 沙盒权限：settings.mutate 试图把 defaultPreset 切到高于授权级别 → 403
     const needsFolderCheck =
       reqAs.dshpwPerms !== undefined &&
-      reqAs.dshpwPerms.allowed_folders.length > 0 &&
+      isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
       (req.method === 'POST' || req.method === 'PUT' || (req.method === 'DELETE' && isAionuiPanel(parsedUrl.pathname))) &&
       (WORKSPACE_ENDPOINT_RE.test(parsedUrl.pathname) || isAionuiPanel(parsedUrl.pathname));
     const needsSandboxCheck =

@@ -194,6 +194,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   useEffect(() => {
     refresh();
+    // 展开状态下定期刷新：主用户在别处修改子用户权限/工作区后本面板自动同步
+    const timer = window.setInterval(refresh, 30_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const isAdmin = data?.me?.role === 'admin';
@@ -490,12 +493,15 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
                     setDraft(u.id, { folders: e.target.value === '' ? [] : [e.target.value] }),
                 },
                 h('option', { value: '' }, t('permsAll')),
+                h('option', { value: '__deny__' }, t('permsDenyAll')),
                 ...((() => {
                   const paths = Array.from(new Set([...workspaces.map((w) => w.path), ...d.folders]));
-                  return paths.map((p) => {
-                    const ws = workspaces.find((w) => w.path === p);
-                    return h('option', { key: p, value: p }, ws?.title || p);
-                  });
+                  return paths
+                    .filter((p) => p !== '__deny__')
+                    .map((p) => {
+                      const ws = workspaces.find((w) => w.path === p);
+                      return h('option', { key: p, value: p }, ws?.title || p);
+                    });
                 })()),
               ),
               h(

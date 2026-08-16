@@ -672,6 +672,14 @@ export class Database {
     return this.getUsage(userId, day)!;
   }
 
+  /**
+   * 重置用户用量（主用户改配额时调用）：删除该用户全部 user_usage 记录，
+   * 下次使用从零重新计时/计数——"改配额 = 重新给额度"。
+   */
+  resetUsage(userId: number): void {
+    this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(userId);
+  }
+
   // ── 留言 / 聊天 ───────────────────────────────────────────
   listMessages(limit = 100): MessageRow[] {
     const rows = this.stmt(
