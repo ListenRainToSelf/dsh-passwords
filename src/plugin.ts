@@ -34,6 +34,9 @@ const COOKIE_NAME = 'dsh_gateway_token';
 /** 请求体上限（用户管理 JSON 都很小） */
 const MAX_BODY = 4096;
 
+/** 请求体超限专用错误：读完后回 413，而不是销毁 socket 造成代理 502 */
+class BodyTooLargeError extends Error {}
+
 function readCookie(cookieHeader: string | undefined, cookieName: string): string | null {
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(';')) {
@@ -63,16 +66,22 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let tooLarge = false;
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
+      if (tooLarge) return; // 已超限：继续排空剩余数据，保持连接可用于回包
       if (size > MAX_BODY) {
-        reject(new Error('body too large'));
-        req.destroy();
+        tooLarge = true;
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (tooLarge) {
+        // 不销毁 socket：在同一连接上回 413，避免网关代理看到连接重置转成 502
+        reject(new BodyTooLargeError());
+        return;
+      }
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
       } catch (error) {
@@ -296,6 +305,10 @@ export function apply(ctx: Context): void {
   const failJson = (res: ServerResponse, error: unknown): void => {
     if (error instanceof AuthError) {
       writeJson(res, error.status, { ok: false, code: error.code, error: error.message });
+      return;
+    }
+    if (error instanceof BodyTooLargeError) {
+      writeJson(res, 413, { ok: false, code: 'BODY_TOO_LARGE', error: '请求体过大（上限 4KB）' });
       return;
     }
     writeJson(res, 500, {
