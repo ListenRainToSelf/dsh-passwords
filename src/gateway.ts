@@ -717,7 +717,7 @@ export function createGatewayServer(
       try {
         hardenSecretsAfterSetup(config);
       } catch (error) {
-        console.error('[dsh-passwords] 首次配置密钥加固失败（可忽略，建议手动删除 setup-key.txt）:', error);
+        console.error('[dsh-passwords] 首次配置密钥加固失败：请立即手动删除 setup-key.txt 并轮换 SETUP_KEY（否则密钥可被派生伪造会话/解密数据）:', error);
       }
       res.redirect(302, '/gateway/login');
     } catch (error) {
@@ -1307,7 +1307,11 @@ export function createGatewayServer(
       },
       () => {},
     );
-    r.on('error', () => {});
+    r.on('error', (error) => {
+      // 沙盒注入失败（dsh 重启窗口期/插件未部署）静默 = 受限子用户新会话拿到默认
+      // workspace-write 沙盒（比授权高一档的提权）且无人知晓——必须留日志
+      console.error(`[dsh-passwords] 沙盒注入失败 session=${sessionId} mode=${mode}: ${error?.message ?? error}`);
+    });
     r.on('timeout', () => r.destroy());
     r.end(body);
   }
@@ -1388,7 +1392,11 @@ export function createGatewayServer(
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
-              res.destroy();
+              // 注入失败（gzip 损坏/编码异常）：与其他拦截分支同口径——原样透传，
+              // 不 destroy（destroy 会让客户端看到连接重置，且与其他分支行为不一致）
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
             }
           });
           return;
@@ -1447,7 +1455,9 @@ export function createGatewayServer(
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
             } catch {
-              // 非 JSON 响应：原样透传，副作用（归属/沙盒）缺失但连接正常
+              // 非 JSON 响应：原样透传，但副作用（归属/沙盒）缺失——记录 warn 便于排查
+              // （正常上游响应都是 JSON，走到这里说明上游行为异常或响应被截断）
+              console.warn(`[dsh-passwords] session.create/fork 上游响应非 JSON，会话归属/沙盒副作用缺失: ${parsedUrl.pathname}`);
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(raw);
@@ -1663,16 +1673,10 @@ export function createGatewayServer(
             if (targetPath === null) {
               const wid = extractWorkspaceId(bodyObj);
               if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
-              // 既无路径字段也无 workspaceId（子用户用空 body 创会话）→ fail-closed：
-              // 不能跳过白名单校验后透传，否则可创建到白名单外的工作区
-              if (wid === null && targetPath === null) {
-                upstreamReq.destroy();
-                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
-                return;
-              }
-              // 缓存里没有该 workspaceId 的映射（进程重启后/从未有 workspace.list
-              // 经过网关）：无法确认目标目录在白名单内，fail-closed 拒绝
-              if (wid !== null && targetPath === null) {
+              // 走到这里仍为 null = 既无路径字段、也无 workspaceId 缓存命中（含空 body /
+              // 缓存 miss）→ 一律 fail-closed：不能跳过白名单校验后透传，否则可创建到
+              // 白名单外的工作区
+              if (targetPath === null) {
                 upstreamReq.destroy();
                 res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
                 return;

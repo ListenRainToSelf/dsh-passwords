@@ -57,7 +57,8 @@ function parseCliOverrides(argv: string[]): CliOverrides {
       if (value === null) continue;
       if (arg === '--port') {
         const port = Number(value);
-        if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        // 0/负数/非整数都拒绝（0 会触发随机端口，与 config.ts 的 >0 校验不一致）
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
           console.error(`[dsh-passwords] ${tr('cli.warnInvalidPort', { value })}`);
         } else {
           out.port = port;
@@ -70,7 +71,7 @@ function parseCliOverrides(argv: string[]): CliOverrides {
       i++;
     } else if (arg.startsWith('--port=')) {
       const port = Number(arg.slice('--port='.length));
-      if (Number.isInteger(port) && port >= 0 && port <= 65535) out.port = port;
+      if (Number.isInteger(port) && port > 0 && port <= 65535) out.port = port;
     } else if (arg.startsWith('--host=')) {
       out.host = arg.slice('--host='.length);
     } else if (arg.startsWith('--upstream=')) {
@@ -83,11 +84,20 @@ function parseCliOverrides(argv: string[]): CliOverrides {
 /** 审计日志查看命令：node dist/cli.js audit [--limit N]（自动解密敏感字段） */
 function runAudit(argv: string[]): void {
   const limitArg = argv.indexOf('--limit');
-  const limit = limitArg >= 0 && argv[limitArg + 1] ? Number(argv[limitArg + 1]) : 30;
+  let limit = 30;
+  if (limitArg >= 0 && argv[limitArg + 1] !== undefined) {
+    const parsed = Number(argv[limitArg + 1]);
+    // 只接受 1-1000 的整数（负数/浮点/科学计数法/1e2 都会产生非预期分页）
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 1000) {
+      limit = parsed;
+    } else {
+      console.error(`[dsh-passwords] ${tr('cli.warnInvalidLimit', { value: argv[limitArg + 1] })}`);
+    }
+  }
   const config = loadConfig();
   const db = new Database(config.dbPath, createFieldCrypto(config.dbEncKey, config.setupKey));
   db.init();
-  const rows = db.listAuditLogs(Number.isFinite(limit) ? limit : 30);
+  const rows = db.listAuditLogs(limit);
   if (rows.length === 0) {
     console.log(tr('cli.noAudit'));
     return;
@@ -101,6 +111,9 @@ function runAudit(argv: string[]): void {
   }
 }
 
+/** 服务名白名单：systemctl restart <service> 拼到 shell 命令里，必须校验字符集 */
+const SERVICE_NAME_RE = /^[A-Za-z0-9_.@-]+$/;
+
 /** 补丁管理命令：node dist/cli.js patch [status]（补丁强制启用；无参数=立即重载） */
 function runPatch(argv: string[]): void {
   const action = argv[0];
@@ -108,6 +121,11 @@ function runPatch(argv: string[]): void {
   const root = findDshRoot(config.patch.dshRoot);
   if (!root) {
     console.error(`[dsh-passwords] ${tr('cli.noDshRoot')}`);
+    process.exit(1);
+  }
+  // 服务名注入防护：与 patch.ts 的 restartDshWeb 同口径，CLI 路径也校验
+  if (config.patch.restartService && !SERVICE_NAME_RE.test(config.patch.restartService)) {
+    console.error(`[dsh-passwords] ${tr('cli.warnInvalidService', { service: config.patch.restartService })}`);
     process.exit(1);
   }
   console.log(`${tr('cli.dshDir')}: ${root}`);
@@ -308,14 +326,38 @@ async function boot() {
   const parentPid = Number(process.env.DSH_GATEWAY_PARENT_PID ?? '');
   if (Number.isInteger(parentPid) && parentPid > 0) {
     console.error(`[dsh-passwords] ${tr('cli.watchParent', { pid: parentPid })}`);
-    setInterval(() => {
+    // 记录父进程启动时刻（/proc/<pid>/stat field 22，jiffies）：kill(pid,0) 只
+    // 验证 PID 存在，父进程死后 PID 被系统复用时看门狗会永不退出（僵尸进程）。
+    // 读不到 /proc（非 Linux）时退化为仅 PID 存活判断。
+    const readParentStart = (): number | null => {
+      try {
+        const stat = readFileSync(`/proc/${parentPid}/stat`, 'utf8');
+        const afterComm = stat.slice(stat.lastIndexOf(')') + 2);
+        const starttime = Number(afterComm.split(' ')[19]);
+        return Number.isFinite(starttime) ? starttime : null;
+      } catch {
+        return null;
+      }
+    };
+    const parentStart = readParentStart();
+    const watchdog = setInterval(() => {
       try {
         process.kill(parentPid, 0);
       } catch {
         console.error(`[dsh-passwords] ${tr('cli.parentGone')}`);
         process.exit(0);
+        return;
+      }
+      // PID 仍在但启动时刻变了 → 原父进程已死，PID 被复用 → 退出
+      if (parentStart !== null) {
+        const now = readParentStart();
+        if (now !== null && now !== parentStart) {
+          console.error(`[dsh-passwords] ${tr('cli.parentGone')}`);
+          process.exit(0);
+        }
       }
     }, 3000);
+    watchdog.unref();
   }
 
   process.on('SIGINT', () => {

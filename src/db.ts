@@ -261,7 +261,18 @@ export class Database {
     const upd = this.stmt('UPDATE users SET username = ?, username_hash = ? WHERE id = ?');
     let changed = false;
     for (const row of rows) {
-      const isCipher = row.username.startsWith('v1:');
+      // 密文判定不能只看 v1: 前缀——明文用户名恰好以 v1: 开头时会被误判为密文
+      // （解密失败 → 跳过 → 该行永远明文且 username_hash 缺失）。只有同时满足
+      // “v1: 前缀 + 合法 base64 + 长度 ≥ 28（iv12+tag16）”才视为密文。
+      const looksLikeCipher = (s: string): boolean => {
+        if (!s.startsWith('v1:')) return false;
+        try {
+          return Buffer.from(s.slice(3), 'base64').length >= 28;
+        } catch {
+          return false;
+        }
+      };
+      const isCipher = looksLikeCipher(row.username);
       let plain: string | null = null;
       if (isCipher) {
         const decrypted = this.crypto.decrypt(row.username);
@@ -548,8 +559,9 @@ export class Database {
           this.stmt('DELETE FROM audit_logs WHERE id <= (SELECT MAX(id) - ? FROM audit_logs)').run(
             Database.AUDIT_MAX_ROWS,
           );
-        } catch {
-          // 修剪失败不影响审计主流程（下次再试）
+        } catch (error) {
+          // 修剪失败（磁盘满/数据库锁）：记录告警——表会持续增长，不能静默
+          console.warn('[dsh-passwords] 审计日志修剪失败（表可能持续增长）:', String(error));
         }
       }
     } catch {
@@ -873,8 +885,9 @@ export class Database {
         this.stmt('DELETE FROM messages WHERE id <= (SELECT MAX(id) - ? FROM messages)').run(
           Database.MESSAGES_MAX_ROWS,
         );
-      } catch {
-        // 修剪失败不影响发送主流程
+      } catch (error) {
+        // 修剪失败（磁盘满/数据库锁）：记录告警——留言表会持续增长，不能静默
+        console.warn('[dsh-passwords] 留言修剪失败（表可能持续增长）:', String(error));
       }
     }
     const sender = this.getUserById(senderId);

@@ -31,24 +31,6 @@ const WHITELIST_TARGET = path.join(
 const SETTINGS_FROM = 'connection.isLoopback ? "host" : "memory"';
 const SETTINGS_TO = '"host"';
 
-/** 白名单完整列表：dsh 自带 7 个 + dsh-web-ui 插件 6 个 + 本项目 1 个 */
-const WL_NAMESPACES = [
-  'agent-loop',
-  'shell',
-  'locale',
-  'permission',
-  'ui-conversation',
-  'ui-theme',
-  'web-search-deepseek',
-  'task-board',
-  'dsh-ssh',
-  'pet',
-  'live-stats',
-  'remote-web-ui',
-  'skin-background',
-  'dsh-passwords',
-];
-
 /** 找到 dsh 安装根目录（@deepseek-ai/dsh），找不到返回 null */
 export function findDshRoot(explicit: string): string | null {
   if (explicit) return existsSync(explicit) ? explicit : null;

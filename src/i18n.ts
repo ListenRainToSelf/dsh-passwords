@@ -88,6 +88,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     // ── CLI ──
     'cli.warnMissingValue': '{name} 缺少值',
     'cli.warnInvalidPort': '无效端口 {value}，已忽略',
+    'cli.warnInvalidLimit': '无效 --limit 值 {value}（需为 1-1000 的整数），使用默认值 30',
+    'cli.warnInvalidService': '重启服务名非法（拒绝执行）：{service}',
     'cli.noAudit': '（暂无审计日志）',
     'cli.noDshRoot': '找不到 dsh 安装目录（可用 MCP_DSH_ROOT 指定 @deepseek-ai/dsh 路径）',
     'cli.dshDir': 'dsh 目录',
@@ -191,6 +193,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     'gw.sandboxDenied': 'Your sandbox permission is too low to switch to that level',
     'cli.warnMissingValue': 'missing value for {name}',
     'cli.warnInvalidPort': 'invalid port {value}, ignored',
+    'cli.warnInvalidLimit': 'invalid --limit value {value} (must be an integer 1-1000), using default 30',
+    'cli.warnInvalidService': 'invalid restart service name (refusing to run): {service}',
     'cli.noAudit': '(no audit logs)',
     'cli.noDshRoot': 'cannot find the dsh install directory (set MCP_DSH_ROOT to the @deepseek-ai/dsh path)',
     'cli.dshDir': 'dsh directory',
