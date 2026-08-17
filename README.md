@@ -50,9 +50,9 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制——�
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
 
-| 设置页卡片 · 权限与配额 |
-|:---:|
-| <img src="docs/screenshots/card-back.png" width="360"> |
+| | 设置页卡片 · 权限与配额 | |
+|:---:|:---:|:---:|
+| | <img src="docs/screenshots/card-back.png" width="360"> | |
 ## 快速开始
 
 ### 0. 前置条件（三样）

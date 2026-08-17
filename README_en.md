@@ -50,9 +50,9 @@ The owner can configure, per subuser, from the settings page:
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
 
-| Settings card · permissions & quotas |
-|:---:|
-| <img src="docs/screenshots/card-back.png" width="360"> |
+| | Settings card · permissions & quotas | |
+|:---:|:---:|:---:|
+| | <img src="docs/screenshots/card-back.png" width="360"> | |
 ## Quick start
 
 ### 0. Prerequisites (three things)
