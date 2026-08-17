@@ -1166,6 +1166,17 @@ export function createGatewayServer(
     // 缓冲/改写路径用 end(body) 重写 content-length，chunked 的 transfer-encoding
     // 若保留会造成 Node 的 ERR_HTTP_CONTENT_LENGTH_MISMATCH
     delete headers['transfer-encoding'];
+    // F-15：剥离网关会话 Cookie（dsh_gateway_token JWT）——上游 dsh 是无认证
+    // 应用，本不需要令牌；不剥离则上游或其第三方插件被入侵/投毒时可收割全部
+    // 活动会话 JWT 并回放。白盒确认 dsh-host-webserver / dsh-anonymous-user-id
+    // 均无 cookie 逻辑。
+    // 例外：/api/dsh-passwords/* 是本网关自身插件路由，其 guard 靠 Cookie 中
+    // 的 JWT 鉴权（同一信任域、自己签发的服务），必须保留；其余上游面全剥。
+    const ownPluginRoute = new URL(
+      req.originalUrl,
+      `http://${req.headers.host ?? 'localhost'}`,
+    ).pathname.startsWith('/api/dsh-passwords/');
+    if (!ownPluginRoute) delete headers['cookie'];
     // 只允许 gzip/identity：HTML 注入与 workspace/session 过滤只处理 gzip，
     // 上游若返回 br 会损坏页面/导致过滤静默失效（brotli 不走代理缓冲）
     headers['accept-encoding'] = 'gzip';
@@ -1310,7 +1321,7 @@ export function createGatewayServer(
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              const changed = clampSessionHistorySandbox(
+              void clampSessionHistorySandbox(
                 parsed,
                 reqAs.dshpwPerms!.sandbox_mode as 'read-only' | 'workspace-write' | 'danger-full-access',
               );
@@ -1406,26 +1417,18 @@ export function createGatewayServer(
       // aionui-panel 写文件（/write）可能携带大 JSON，单独放宽上限并完整检查；
       // 其余需要检查的端点 body 天然很小（session.create/settings.mutate/respond），
       // 超限即 fail-closed，防止“超限透传”绕过权限检查。
-      const isAionuiWrite =
-        reqAs.dshpwPerms !== undefined && isAionuiPanel(parsedUrl.pathname) && req.method === 'POST';
-      const bodyLimit = isAionuiWrite ? 4 * 1024 * 1024 : MAX_BODY;
+      const bodyLimit = isAionuiPanel(parsedUrl.pathname) ? 4 * 1024 * 1024 : MAX_BODY;
       req.on('data', (chunk: Buffer) => {
         if (settled) return;
         size += chunk.length;
         if (size > bodyLimit) {
-          // 超大且非 aionui 写端点：拒绝，不透传（防止绕过白名单/审批检查）
-          if (!isAionuiWrite) {
-            settled = true;
-            const lang = langOf(req);
-            // 先中止上游请求，否则上游响应到达时会对已发送的响应再 writeHead
-            upstreamReq.destroy();
-            res.status(413).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
-            return;
-          }
+          // F-17：超限一律 fail-closed（413）——之前 aionui 写超大 body 会
+          // 透传跳过白名单校验（fail-open），形成防御缺口
           settled = true;
-          upstreamReq.write(Buffer.concat(chunks));
-          upstreamReq.write(chunk);
-          req.pipe(upstreamReq);
+          const lang = langOf(req);
+          // 先中止上游请求，否则上游响应到达时会对已发送的响应再 writeHead
+          upstreamReq.destroy();
+          res.status(413).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
           return;
         }
         chunks.push(chunk);
@@ -1454,6 +1457,13 @@ export function createGatewayServer(
           if (isAionuiPanel(parsedUrl.pathname)) {
             // aionui-panel 文件树：root 是工作区路径，path 是 root 下的相对文件路径
             targetPath = aionuiRootFrom(req.method, parsedUrl.pathname, parsedUrl.searchParams, bodyObj);
+            // F-17b：提取不到 root（DELETE 无 query/body、异常编码等）→ fail-closed，
+            // 不能静默跳过白名单校验后透传
+            if (targetPath === null) {
+              upstreamReq.destroy();
+              res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+              return;
+            }
           } else {
             targetPath = extractPathFromBody(bodyObj);
             if (targetPath === null) {
@@ -1597,9 +1607,12 @@ export function createGatewayServer(
         `${req.method ?? 'GET'} ${url.pathname + url.search} HTTP/1.1`,
       ];
       for (const [key, value] of Object.entries(req.headers)) {
-        if (key.toLowerCase() === 'host') {
+        const lower = key.toLowerCase();
+        // F-15：与 HTTP 代理同口径——不把网关会话 Cookie 转发给上游
+        if (lower === 'cookie') continue;
+        if (lower === 'host') {
           lines.push(`Host: ${upstreamHost}:${upstreamPort}`);
-        } else if (key.toLowerCase() === 'origin' && typeof value === 'string') {
+        } else if (lower === 'origin' && typeof value === 'string') {
           lines.push(`Origin: http://${upstreamHost}:${upstreamPort}`);
         } else if (value !== undefined) {
           lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);

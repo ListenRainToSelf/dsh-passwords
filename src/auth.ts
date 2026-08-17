@@ -66,14 +66,14 @@ export function assertNoSqlInjection(value: unknown, field: string): void {
   }
 }
 
-export function assertUsername(username: unknown): string {
+function assertUsername(username: unknown): string {
   if (typeof username !== 'string' || !USERNAME_RE.test(username)) {
     throw new AuthError('INVALID_USERNAME');
   }
   return username;
 }
 
-export function assertPassword(password: unknown): string {
+function assertPassword(password: unknown): string {
   if (typeof password !== 'string' || !PASSWORD_RE.test(password)) {
     throw new AuthError('INVALID_PASSWORD');
   }

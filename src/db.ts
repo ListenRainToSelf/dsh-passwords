@@ -15,9 +15,9 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { FieldCrypto } from './encrypt.js';
 
-export type UserRole = 'admin' | 'user';
+type UserRole = 'admin' | 'user';
 
-export interface UserRow {
+interface UserRow {
   id: number;
   username: string;
   password_hash: string;
@@ -37,7 +37,7 @@ export interface UserListRow {
   last_login_at: string | null;
 }
 
-export interface AuditLogRow {
+interface AuditLogRow {
   id: number;
   event_type: string;
   username: string | null;
@@ -61,7 +61,7 @@ export interface UserPermissionsRow {
 }
 
 /** 用户用量（对应 user_usage 表） */
-export interface UsageRow {
+interface UsageRow {
   user_id: number;
   day: string;
   first_seen_at: string | null;

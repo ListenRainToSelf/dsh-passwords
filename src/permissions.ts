@@ -10,10 +10,19 @@
 //
 // 说明：folder / upload / git 的网关层拦截是"尽力而为"（基于 dsh 的 HTTP API
 // 路径与请求体字段）。主用户账号不受任何限制。
+import path from 'node:path';
 
-/** 规范化路径：反斜杠转正斜杠、去尾部斜杠、Windows 盘符统一小写（大小写不敏感比较） */
+/**
+ * 规范化路径：反斜杠转正斜杠、解析 . / .. 点段、去尾部斜杠、
+ * Windows 盘符统一小写（大小写不敏感比较）。
+ * F-21：必须解析点段——/root/11/../21 在文件系统层等于 /root/21，
+ * 若只做字符串前缀匹配，白名单会被 .. 点段直接绕过（实锤：受限子用户
+ * 可写/删白名单外文件、建会话到 /etc）。posix.normalize 与 dsh 的
+ * 路径解析口径一致（dsh 运行于 Linux 且自身也用 URL/路径归一化）。
+ */
 function normalizePath(p: string): string {
-  let n = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  let n = p.replace(/\\/g, '/');
+  n = path.posix.normalize(n);
   if (n.length >= 2 && n[1] === ':') n = n[0].toLowerCase() + n.slice(1);
   return n;
 }
@@ -22,7 +31,7 @@ function normalizePath(p: string): string {
  * 工作区白名单的"禁止所有"哨兵值：主用户选择"禁止工作区"时存入白名单，
  * 与空数组（=全部允许）区分开（空数组还是"未限制"语义，兼容默认子用户）。
  */
-export const DENY_ALL_WORKSPACES = '__deny__';
+const DENY_ALL_WORKSPACES = '__deny__';
 
 /** 子用户是否受工作区约束（白名单非空，含"禁止所有"哨兵或真实路径） */
 export function isWorkspaceRestricted(allowedFolders: string[]): boolean {
@@ -39,7 +48,8 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
   const p = normalizePath(path);
   return allowedFolders.some((entry) => {
     const base = normalizePath(entry);
-    if (base === '' || base === '/') return true;
+    // normalize('') → '.'：空条目与根（'/'）都视为全盘允许
+    if (base === '.' || base === '/') return true;
     return p === base || p.startsWith(base + '/');
   });
 }
@@ -102,7 +112,7 @@ export function extractWorkspaceId(value: unknown, depth = 0): string | null {
 }
 
 /** 沙盒权限级别（dsh SANDBOX_MODES）+ 严重度排序（越靠后越宽松） */
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export const SANDBOX_RANK: Record<SandboxMode, number> = {
   'read-only': 0,
   'workspace-write': 1,
@@ -311,7 +321,11 @@ export function isAionuiPanel(pathname: string): boolean {
   return pathname.startsWith('/aionui-panel/');
 }
 
-/** 从 aionui-panel 请求中提取 root（工作区路径）：GET/HEAD 取 query，POST 取 JSON body */
+/**
+ * 从 aionui-panel 请求中提取 root（工作区路径）：GET/HEAD/DELETE 取 query
+ * （F-17b：DELETE 的 root 在 query 而非 body，之前漏读导致白名单校验跳过），
+ * POST/PUT 取 JSON body。提取不到返回 null（调用方必须 fail-closed）。
+ */
 export function aionuiRootFrom(
   method: string,
   pathname: string,
@@ -319,9 +333,11 @@ export function aionuiRootFrom(
   bodyJson: unknown,
 ): string | null {
   if (!isAionuiPanel(pathname)) return null;
-  if (method === 'GET' || method === 'HEAD') {
+  if (method === 'GET' || method === 'HEAD' || method === 'DELETE') {
     const root = query.get('root');
-    return root !== null && root.length > 0 ? root : null;
+    if (root !== null && root.length > 0) return root;
+    if (method === 'GET' || method === 'HEAD') return null;
+    // DELETE：query 无 root 时兜底读 body
   }
   if (typeof bodyJson === 'object' && bodyJson !== null) {
     const root = (bodyJson as Record<string, unknown>).root;

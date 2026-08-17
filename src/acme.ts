@@ -20,7 +20,7 @@ const DIRECTORIES = {
 /** 续期阈值：证书剩余有效期小于该值时触发续期 */
 const RENEW_BEFORE_MS = 30 * 24 * 3600 * 1000;
 
-export interface AcmeResult {
+interface AcmeResult {
   certPath: string;
   keyPath: string;
   expiresAt: number;
@@ -81,7 +81,7 @@ const OID_ECDSA_SHA256 = Buffer.from([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 
  *   SPKI（直接取 publicKey.export spki DER）, [0] 空属性 }
  * 签名用 P-256 + SHA256，签名值以 DER 形式放入 BIT STRING。
  */
-export function buildCsr(privateKey: KeyObject, domain: string): Buffer {
+function buildCsr(privateKey: KeyObject, domain: string): Buffer {
   const spki = createPublicKey(privateKey).export({ type: 'spki', format: 'der' }) as Buffer;
   const name = derSeq(derSet(derSeq(derOid(OID_CN), derUtf8(domain))));
   const info = derSeq(derInt(0), name, spki, Buffer.from([0xa0, 0x00]));
@@ -168,7 +168,7 @@ interface AcmeResponse {
 }
 
 /** ACME 服务端错误（带 type/detail，便于日志定位） */
-export class AcmeError extends Error {
+class AcmeError extends Error {
   constructor(
     public readonly type: string,
     detail: string,

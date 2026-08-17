@@ -152,7 +152,7 @@ export function loadConfig(): PlatformConfig {
 }
 
 /** 当前生效的 .env 文件路径（与 loadConfig 的读取路径保持一致） */
-export function envFilePath(): string {
+function envFilePath(): string {
   return process.env.DSH_PASSWORDS_ENV_FILE?.trim() || path.join(moduleDir, '..', '.env');
 }
 

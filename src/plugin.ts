@@ -457,6 +457,12 @@ export function apply(ctx: Context): void {
       handler: (req, res) => {
         const caller = guard(req, res);
         if (!caller) return;
+        // F-20：工作区路径清单仅主用户可读（供其配置子用户白名单下拉选择）；
+        // 子用户不应看到全部工作区目录清单（信息泄露面）
+        if (caller.role !== 'admin') {
+          writeJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '仅主用户可操作' });
+          return;
+        }
         // 读取 dsh 已注册的工作区目录（供主用户配置子用户可访问文件夹时下拉选择）
         try {
           const reg = ctx.get('workspaceRegistry') as unknown as

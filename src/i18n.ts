@@ -243,7 +243,7 @@ export function t(lang: Lang, key: string, params?: Params): string {
  * （zh | en，dsh 设置页 General → Language 写入）。读不到返回 null。
  * 与 gateway.ts 里读 ui-theme.preference 用的是同一套候选路径逻辑。
  */
-export function readDshLocalePreference(): Lang | null {
+function readDshLocalePreference(): Lang | null {
   const explicit = process.env.MCP_DSH_SETTINGS_FILE?.trim();
   const dshHome = process.env.DSH_HOME?.trim();
   const candidates: string[] = explicit
