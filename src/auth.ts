@@ -47,7 +47,10 @@ export class AuthError extends Error {
 
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
-/** 密码策略：12-128 位，且大写、小写、数字、符号各至少一位（上限防 bcrypt 72 字节静默截断） */
+/** 密码策略：12-128 位（字符），且大写、小写、数字、符号各至少一位
+ *  注：bcryptjs 内部按 UTF-8 字节做 72 字节截断——超过 72 字节的多字节密码后缀
+ *  会被静默丢弃。assertPassword() 在字符匹配后再做 byteLength 校验（≤72 字节），
+ *  不在正则里用字节数（JS regex 不支持）。 */
 const PASSWORD_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,128}$/;
 
 /**
@@ -75,6 +78,11 @@ function assertUsername(username: unknown): string {
 
 function assertPassword(password: unknown): string {
   if (typeof password !== 'string' || !PASSWORD_RE.test(password)) {
+    throw new AuthError('INVALID_PASSWORD');
+  }
+  // UTF-8 字节上限 72：bcryptjs 静默截断 72 字节之后的内容（多字节字符如中文会
+  // 提早截断）。按字符数限 12-128 不足以防截断——必须按 byteLength 校验。
+  if (Buffer.byteLength(password, 'utf8') > 72) {
     throw new AuthError('INVALID_PASSWORD');
   }
   return password;

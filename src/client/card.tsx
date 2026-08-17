@@ -169,21 +169,24 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
           api<PermOverview>('/gateway/api/overview')
             .then((o) => {
               setOverview(o);
-              const drafts: Record<number, PermDraft> = {};
-              for (const u of o.users) {
-                if (u.role === 'user') {
-                  drafts[u.id] = {
-                    folders: [...(u.permissions.allowedFolders ?? [])],
-                    token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
-                    minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
-                    upload: u.permissions.allowUpload,
-                    git: u.permissions.allowGitDownload,
-                    banned: u.permissions.banned,
-                    sandbox: u.permissions.sandboxMode ?? '',
-                  };
+              // 只初始化新出现的用户 draft，已存在的本地编辑（admin 正在改的权限/限额）保留
+              setPermDrafts((prev) => {
+                const drafts: Record<number, PermDraft> = { ...prev };
+                for (const u of o.users) {
+                  if (u.role === 'user' && !(u.id in drafts)) {
+                    drafts[u.id] = {
+                      folders: [...(u.permissions.allowedFolders ?? [])],
+                      token: u.permissions.hourlyTokenLimit === null ? '' : String(u.permissions.hourlyTokenLimit),
+                      minutes: u.permissions.dailyMinutesLimit === null ? '' : String(u.permissions.dailyMinutesLimit),
+                      upload: u.permissions.allowUpload,
+                      git: u.permissions.allowGitDownload,
+                      banned: u.permissions.banned,
+                      sandbox: u.permissions.sandboxMode ?? '',
+                    };
+                  }
                 }
-              }
-              setPermDrafts(drafts);
+                return drafts;
+              });
               api<{ workspaces: Array<{ path: string; title: string }> }>('/api/dsh-passwords/workspaces')
                 .then((r) => setWorkspaces(r.workspaces ?? []))
                 .catch(() => setWorkspaces([]));

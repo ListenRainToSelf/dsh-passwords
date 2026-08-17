@@ -24,7 +24,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     'err.ALREADY_INITIALIZED': '平台已初始化，不能重复配置',
     'err.INVALID_SETUP_KEY': '预设密钥不正确',
     'err.INVALID_USERNAME': '用户名需为 3-32 位字母、数字、下划线或连字符',
-    'err.INVALID_PASSWORD': '密码需至少 12 位，且必须同时包含大写字母、小写字母、数字、符号各至少一位',
+    'err.INVALID_PASSWORD': '密码需至少 12 位（且最多 72 字节，UTF-8 编码），且必须同时包含大写字母、小写字母、数字、符号各至少一位',
+    'err.INVALID_CURRENT_PASSWORD': '当前密码错误',
     'err.SQL_INJECTION_REJECTED': '{field} 包含非法字符，已拒绝',
     'err.ACCOUNT_LOCKED': '账号已锁定，请 {minutes} 分钟后再试',
     'err.ACCOUNT_LOCKED_FRESH': '连续失败 {count} 次，账号已锁定 {minutes} 分钟',
@@ -33,7 +34,6 @@ const DICT: Record<Lang, Record<string, string>> = {
     'err.INVALID_TOKEN': '会话无效或已过期',
     'err.NO_SUCH_USER': '目标用户不存在',
     'err.FORBIDDEN_PASSWORD': '只有主用户可以修改他人密码',
-    'err.INVALID_CURRENT_PASSWORD': '当前密码不正确',
     'err.FORBIDDEN_USERNAME': '只有主用户可以修改他人用户名',
     'err.FORBIDDEN_ADD_USER': '只有主用户可以分配子用户',
     'err.FORBIDDEN_REMOVE_USER': '只有主用户可以删除用户',
@@ -285,10 +285,27 @@ function readDshLocalePreference(): Lang | null {
 
 function parseAcceptLanguage(header: string | null | undefined): string | null {
   if (!header) return null;
-  const first = header.split(',')[0]?.trim();
-  if (!first) return null;
-  const primary = first.split('-')[0].toLowerCase();
-  return primary === 'zh' || primary === 'en' ? primary : null;
+  // 遍历所有条目，剥 ;q= 权重（按 q 降序），取第一个 zh/en 主语言
+  // 之前只取逗号第一段且不剥 q=，会忽略 zh;q=0.8 / en;q=0.9 之类真实偏好
+  const candidates: Array<{ lang: string; q: number }> = [];
+  for (const part of header.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const [tag, ...params] = trimmed.split(';');
+    const primary = (tag || '').split('-')[0].toLowerCase();
+    if (primary !== 'zh' && primary !== 'en') continue;
+    let q = 1;
+    for (const p of params) {
+      const m = /^\s*q\s*=\s*([\d.]+)\s*$/.exec(p);
+      if (m) {
+        const v = parseFloat(m[1]);
+        if (!Number.isNaN(v) && v >= 0 && v <= 1) q = v;
+      }
+    }
+    candidates.push({ lang: primary, q });
+  }
+  candidates.sort((a, b) => b.q - a.q);
+  return candidates[0]?.lang ?? null;
 }
 
 /** 解析网关页面语言：?lang → cookie → dsh 设置 → 浏览器语言 → zh */
