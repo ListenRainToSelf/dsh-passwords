@@ -42,18 +42,17 @@ The owner can configure, per subuser, from the settings page:
 
 ## Screenshots
 
-| Login page (light · follows system) | Login page (dark · follows dsh theme) |
-|---|---|
-| <img src="docs/screenshots/login-light.png" width="380"> | <img src="docs/screenshots/login-dark.png" width="380"> |
+| Login page · light | Login page · dark | Login page · English |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
 
-| First-time setup page (first visit) | dsh main UI (after login) |
-|---|---|
-| <img src="docs/screenshots/setup-page.png" width="380"> | <img src="docs/screenshots/dsh-ui.png" width="380"> |
+| dsh main UI (after login) | Chat / messages | Settings card · account management |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
 
-| Auth code | Terminal tests |
-|---|---|
-| <img src="docs/screenshots/code-auth.png" width="380"> | <img src="docs/screenshots/terminal-test.png" width="380"> |
-
+| Settings card · permissions & quotas |
+|:---:|
+| <img src="docs/screenshots/card-back.png" width="360"> |
 ## Quick start
 
 ### 0. Prerequisites (three things)

@@ -42,18 +42,17 @@ dsh 自带的网页界面没有登录、没有权限、没有用量控制——�
 
 ## 界面截图
 
-| 登录页（浅色 · 跟随系统） | 登录页（深色 · 跟随 dsh 主题） |
-|---|---|
-| <img src="docs/screenshots/login-light.png" width="380"> | <img src="docs/screenshots/login-dark.png" width="380"> |
+| 登录页 · 浅色 | 登录页 · 深色 | 登录页 · English |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/white-login.png" width="360"> | <img src="docs/screenshots/black-login.png" width="360"> | <img src="docs/screenshots/white-login-en.png" width="360"> |
 
-| 首次配置页（首次访问） | dsh 主界面（登录后） |
-|---|---|
-| <img src="docs/screenshots/setup-page.png" width="380"> | <img src="docs/screenshots/dsh-ui.png" width="380"> |
+| dsh 主界面（登录后） | 聊天 / 留言 | 设置页卡片 · 账号管理 |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/main-ui.png" width="360"> | <img src="docs/screenshots/chat.png" width="360"> | <img src="docs/screenshots/card-front.png" width="360"> |
 
-| 认证代码 | 终端测试 |
-|---|---|
-| <img src="docs/screenshots/code-auth.png" width="380"> | <img src="docs/screenshots/terminal-test.png" width="380"> |
-
+| 设置页卡片 · 权限与配额 |
+|:---:|
+| <img src="docs/screenshots/card-back.png" width="360"> |
 ## 快速开始
 
 ### 0. 前置条件（三样）
