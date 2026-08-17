@@ -110,16 +110,26 @@ export function applyRemotePatch(dshRoot: string): 'applied' | 'unchanged' | 'mi
     changed = true;
   }
 
-  // 2) 白名单补齐（整块重建，兼容任意已打过部分补丁的状态）
+  // 2) 白名单补齐（最小插入：仅追加 "dsh-passwords"，不重写整块数组）
+  // 之前整块替换会抹掉其他插件/已声明的命名空间（如 dsh 升级新增、其他插件
+  // 补进去的条目），仅靠 '"dsh-passwords"' 字符串检测是否已打过而无法重打。
   const w = readFileSync(wlFile, 'utf8');
   if (!w.includes('"dsh-passwords"')) {
-    const block =
-      'const WEB_SETTINGS_NAMESPACES = [\n\t' + WL_NAMESPACES.map((n) => `"${n}"`).join(',\n\t') + '\n];';
-    const re = /const WEB_SETTINGS_NAMESPACES = \[[\s\S]*?\];/;
+    const re = /const WEB_SETTINGS_NAMESPACES = \[([\s\S]*?)\];/;
     if (!re.test(w)) return 'missing';
-    if (!existsSync(wlFile + BAK_SUFFIX)) writeFileSync(wlFile + BAK_SUFFIX, w);
-    writeFileSync(wlFile, w.replace(re, block));
-    changed = true;
+    const currentBlock = w.match(re)![1];
+    // 解析现有条目（容错处理单引号/双引号/空白）
+    const existing = [...currentBlock.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1]);
+    if (existing.includes('dsh-passwords')) {
+      // 已在白名单中（检测串缺失可能是引号差异），无需重打
+    } else {
+      if (!existsSync(wlFile + BAK_SUFFIX)) writeFileSync(wlFile + BAK_SUFFIX, w);
+      // 在第一个条目后插入 "dsh-passwords"（保留其他插件/dsh 默认命名空间）
+      const inserted =
+        currentBlock.replace(/(\s*['"][^'"]+['"])/, `$1,\n\t"dsh-passwords"`);
+      writeFileSync(wlFile, w.replace(re, `const WEB_SETTINGS_NAMESPACES = [${inserted}];`));
+      changed = true;
+    }
   }
 
   return changed ? 'applied' : 'unchanged';
@@ -144,9 +154,15 @@ export function rollbackPatch(dshRoot: string): 'rolled-back' | 'no-backup' | 'm
   return changed ? 'rolled-back' : 'no-backup';
 }
 
-/** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程 */
+/** 延迟重启 dsh 网页服务（补丁生效需要 dsh 重新加载模块）；仅适用于常驻进程
+ *  服务名白名单校验：systemctl restart <service> 拼到 shell 命令里，
+ *  服务名若含 `; rm -rf /` 之类会被执行——加字符白名单堵住。 */
 export function restartDshWeb(service: string, delayMs = 2500): void {
   if (!service) return;
+  if (!/^[A-Za-z0-9_.@-]+$/.test(service)) {
+    console.error(`[dsh-passwords] 重启服务名非法（拒绝执行）：${service}`);
+    return;
+  }
   setTimeout(() => {
     try {
       execSync(`systemctl restart ${service}`, { stdio: 'ignore' });

@@ -8,7 +8,7 @@
 //   cert.key.pem      证书私钥（P-256，TLS 用）
 //   fullchain.pem     证书链（叶子 + 中间证书）
 import { createHash, createPrivateKey, createPublicKey, createSign, generateKeyPairSync, X509Certificate, type KeyObject } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { isPublicIp } from './config.js';
 
@@ -331,6 +331,20 @@ export function certExpiryMs(fullchainPath: string): number | null {
   }
 }
 
+/** 读取证书 leaf 的 CN（主域名）——检查旧证书与当前 opts.domain 是否一致，
+ *  避免改 MCP_GATEWAY_DOMAIN 后旧证书一直复用导致浏览器报"域名不匹配"。 */
+function readCertDomain(fullchainPath: string): string | null {
+  try {
+    const pem = readFileSync(fullchainPath, 'utf8');
+    const leaf = new X509Certificate(pem);
+    // 取 subject CN（主域名）；SAN 列表与 CN 通常一致（acme.ts CSR 只写 CN）
+    const cn = leaf.subject.split('\n').find((l) => l.startsWith('CN='));
+    return cn ? cn.slice(3).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 零配置兜底：探测本机公网 IP（外部服务，5 秒超时，失败返回 null） */
 export async function detectPublicIp(): Promise<string | null> {
   for (const url of ['https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com']) {
@@ -367,9 +381,17 @@ export async function ensureCertificate(opts: {
   const accountKeyPath = path.join(opts.acmeDir, 'account.key.pem');
 
   // 已有未到期证书：直接复用（重启/短期多次启动不会重复签发）
+  // 校验证书与当前 opts.domain 匹配：避免用户在 .env 里改 MCP_GATEWAY_DOMAIN 后，
+  // 旧证书一直被复用导致浏览器报"域名不匹配"，直到 30 天续期窗口才重签。
   const existing = certExpiryMs(certPath);
   if (existing !== null && existing - Date.now() > RENEW_BEFORE_MS) {
-    return { certPath, keyPath, expiresAt: existing };
+    const certDomain = readCertDomain(certPath);
+    if (certDomain === opts.domain) {
+      return { certPath, keyPath, expiresAt: existing };
+    }
+    // 域名不匹配：删除旧证书，下方流程会重新签发新域名的证书
+    try { unlinkSync(certPath); } catch { /* 忽略 */ }
+    try { unlinkSync(keyPath); } catch { /* 忽略 */ }
   }
 
   const accountKey = ensureKeyFile(accountKeyPath);
