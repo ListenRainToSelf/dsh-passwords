@@ -1129,6 +1129,12 @@ export function createGatewayServer(
       // /gateway 精确路径与 /gateway/* 都视为网关自有前缀（未注册子路径由
       // 后续中间件处理，避免透传到上游 dsh）
       if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) return next();
+      // P1-1：dsh 插件 internal 端点仅限网关→dsh 本机 HTTP 调用，
+      // 外部请求一律 404（loopback 校验被代理拓扑绕过，不能依赖插件侧防护）
+      if (gatePath.startsWith('/api/dsh-passwords/internal/')) {
+        res.status(404).json({ ok: false, error: 'not found' });
+        return;
+      }
       const user = sessionOf(req);
       if (!user) {
         // 重定向兼容层：记录原始 URL，登录后跳回
@@ -1812,13 +1818,17 @@ export function createGatewayServer(
     // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
+    let userRole: string | null = null;
     if (token && !isTokenRevoked(token)) {
       try {
         const user = auth.verifyToken(token);
         const row = db.getUserByUsername(user.username);
         if (row !== null && user.cv === row.credential_version) {
           const perms = effectivePermissions(row.id);
-          if (!perms.banned) authed = true;
+          if (!perms.banned) {
+            authed = true;
+            userRole = row.role;
+          }
         }
       } catch {
         authed = false;
@@ -1826,6 +1836,21 @@ export function createGatewayServer(
     }
     if (!authed) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // P1-1：internal 端点不接受外部 WS 升级（仅限网关→dsh 本机 HTTP 调用）
+    if (gatePath.startsWith('/api/dsh-passwords/internal/')) {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    // P1-3：WS 升级路径级权限——admin-only 端点对非 admin 拒绝
+    // （WS 只有认证，之前无任何路径级限制；session 所有权/文件白名单/配额等
+    //  仍由上游 dsh 自行控制，此处仅堵 admin-only 端点的水平越权）
+    if (userRole !== 'admin' && isAdminOnlyPluginEndpoint(req.method ?? 'GET', gatePath)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
