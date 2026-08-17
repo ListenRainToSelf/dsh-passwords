@@ -62,7 +62,8 @@
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs",
     "start": "node dist/cli.js serve-gateway",
-    "start:gateway": "node dist/cli.js serve-gateway"
+    "start:gateway": "node dist/cli.js serve-gateway",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

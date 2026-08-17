@@ -2,7 +2,7 @@
 //   用户访问网关端口 → 未认证则渲染登录页（dsh 风格 + 动画）
 //   → 登录成功 Set-Cookie(JWT, HttpOnly) → 302 回到原始 URL（重定向兼容层）
 //   → 已认证请求反向代理到上游 dsh（HTTP + WebSocket，Host 改写为上游地址）
-import http, { type IncomingMessage } from 'node:http';
+import http, { type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import https from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { readFileSync } from 'node:fs';
@@ -1138,6 +1138,21 @@ export function createGatewayServer(
   });
 
   // ── 反向代理（HTTP）→ 上游 dsh ──────────────────────────────
+  // 改写路径：body 已重算，分帧以新 content-length 为准，必须清掉上游的
+  // transfer-encoding（RFC 9110 §8.6：CL 与 TE 同帧属于畸形消息，Nginx 直接 502）
+  function headersForRewrittenBody(upstreamHeaders: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
+    const h: Record<string, string | string[] | undefined> = { ...upstreamHeaders };
+    delete h['content-length'];
+    delete h['content-encoding'];
+    delete h['transfer-encoding'];
+    return h;
+  }
+  // 流式透传：上游若异常同时带 CL+TE，按 RFC 9110 §8.6 保留 TE、丢弃 CL
+  function headersForStreaming(upstreamHeaders: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
+    const h: Record<string, string | string[] | undefined> = { ...upstreamHeaders };
+    if (h['content-length'] !== undefined && h['transfer-encoding'] !== undefined) delete h['content-length'];
+    return h;
+  }
   app.use((req, res) => {
     const headers: Record<string, string | string[] | undefined> = { ...req.headers };
     // 改写 Host 为上游地址（过 dsh 的 browser-trust fence 第 1 道：Host 检查）
@@ -1186,9 +1201,7 @@ export function createGatewayServer(
               const html = body.toString('utf8');
               const injected = html.replace(/<head[^>]*>/i, (match) => match + INJECT_SCRIPT);
               let out = Buffer.from(injected, 'utf8');
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              delete respHeaders['content-length'];
-              delete respHeaders['content-encoding'];
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               // 代理层补齐防嵌框头（dsh 应用自身未设置）：
               // 允许同源内嵌（dsh 内部如有同源 iframe 不受影响），禁止跨站嵌框。
               // 仅在上游未提供 CSP 时补充 frame-ancestors，避免冲掉上游更严的策略。
@@ -1234,14 +1247,12 @@ export function createGatewayServer(
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              delete respHeaders['content-length'];
-              delete respHeaders['content-encoding'];
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(Buffer.concat(chunks));
             }
@@ -1267,14 +1278,12 @@ export function createGatewayServer(
               const parsed = JSON.parse(body.toString('utf8'));
               const filtered = filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'cwd');
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              delete respHeaders['content-length'];
-              delete respHeaders['content-encoding'];
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(Buffer.concat(chunks));
             }
@@ -1306,14 +1315,12 @@ export function createGatewayServer(
                 reqAs.dshpwPerms!.sandbox_mode as 'read-only' | 'workspace-write' | 'danger-full-access',
               );
               const out = Buffer.from(JSON.stringify(parsed), 'utf8');
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
-              delete respHeaders['content-length'];
-              delete respHeaders['content-encoding'];
+              const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
-              const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+              const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(Buffer.concat(chunks));
             }
@@ -1323,7 +1330,7 @@ export function createGatewayServer(
         }
 
         // ── 非 HTML：原样流式转发 ───────────────────────────────────
-        const respHeaders: Record<string, string | string[] | undefined> = { ...upstreamRes.headers };
+        const respHeaders = headersForStreaming(upstreamRes.headers);
         // dsh 对插件/静态资源返回 no-cache（或不给缓存头），浏览器每次
         // 进页面都要重新下载全部 ~30 个插件文件，导致卡在 "Loading plugins…"。
         // rev 参数/文件名都是内容哈希（换内容即换新 URL），可安全长缓存：
