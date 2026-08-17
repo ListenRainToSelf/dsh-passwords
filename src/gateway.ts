@@ -38,6 +38,10 @@ import {
   collectIdPathPairs,
   extractWorkspaceId,
   findStringField,
+  SESSION_SCOPED_RE,
+  extractSessionId,
+  stripArchivedSessionIds,
+  filterSessionItems,
   sandboxPresetRank,
   permissionPresetFromCommand,
   presetFromSettingsMutate,
@@ -160,7 +164,16 @@ function setCsrfCookie(res: Response, token: string, secure: boolean): void {
 // 显式指定 dsh 设置文件路径（网关与 dsh 不同机时用）。
 type ThemePreference = 'light' | 'dark' | 'system';
 
+// 主题偏好每 5 秒最多读一次 settings.yaml：登录/配置页每次渲染都调用本函数，
+// 同步磁盘 IO 不应成为每个页面 GET 的固定开销。用户切主题后最多延迟 5 秒生效。
+let themePreferenceCache: { value: ThemePreference; at: number } | null = null;
+const THEME_CACHE_TTL_MS = 5_000;
+
 function readDshThemePreference(): ThemePreference {
+  const now = Date.now();
+  if (themePreferenceCache !== null && now - themePreferenceCache.at < THEME_CACHE_TTL_MS) {
+    return themePreferenceCache.value;
+  }
   const explicit = process.env.MCP_DSH_SETTINGS_FILE?.trim();
   const dshHome = process.env.DSH_HOME?.trim();
   const candidates: string[] = explicit
@@ -169,6 +182,7 @@ function readDshThemePreference(): ThemePreference {
         ...(dshHome ? [path.join(dshHome, 'settings.yaml')] : []),
         path.join(os.homedir(), '.dsh', 'settings.yaml'),
       ];
+  let value: ThemePreference = 'system';
   for (const file of candidates) {
     try {
       const text = readFileSync(file, 'utf8');
@@ -177,12 +191,16 @@ function readDshThemePreference(): ThemePreference {
       if (!block || block.index === undefined) continue;
       const rest = text.slice(block.index);
       const hit = rest.match(/^\s+preference\s*:\s*["']?(light|dark|system)["']?\s*(?:#.*)?$/m);
-      if (hit) return hit[1] as ThemePreference;
+      if (hit) {
+        value = hit[1] as ThemePreference;
+        break;
+      }
     } catch {
       // 文件不存在/不可读：继续尝试下一个候选，最终回退 system
     }
   }
-  return 'system';
+  themePreferenceCache = { value, at: now };
+  return value;
 }
 
 /** 主题引导脚本：在 <head> 内尽早设置 data-theme 与 color-scheme，避免闪烁 */
@@ -657,7 +675,24 @@ export function createGatewayServer(
   });
 
   // ── 首次配置提交（POST）→ 302 回登录页 ────────────────────────
+  // 未初始化阶段 setup 端点对全网匿名可达：按 IP 做滑动窗口限速，防止
+  // 匿名狂刷 setup_failure 审计日志（审计表无限增长 → 磁盘耗尽）。
+  // 预设密钥为 192 位随机值，暴力破解本身不可行；这里只限速、不防爆破。
+  const setupAttempts = new Map<string, number[]>();
+  const SETUP_WINDOW_MS = 10 * 60_000;
+  const SETUP_MAX_PER_WINDOW = 10;
+
   app.post('/gateway/setup', async (req, res) => {
+    const ipKey = req.ip ?? '';
+    const nowTs = Date.now();
+    const recent = (setupAttempts.get(ipKey) ?? []).filter((t) => nowTs - t < SETUP_WINDOW_MS);
+    if (recent.length >= SETUP_MAX_PER_WINDOW) {
+      res.status(429).type('html').send('429 Too Many Requests');
+      return;
+    }
+    recent.push(nowTs);
+    setupAttempts.set(ipKey, recent);
+
     const setupKey = typeof req.body?.setupKey === 'string' ? req.body.setupKey : '';
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -751,13 +786,19 @@ export function createGatewayServer(
     }
   });
 
-  // ── 登出 ─────────────────────────────────────────────────────
-  app.get('/gateway/logout', (req, res) => {
+  // ── 登出（F-24：仅 POST，杜绝 <img>/<form> 跨站 GET 强制登出 CSRF） ──
+  // SameSite=Lax 的会话 Cookie 不会被跨站 POST 携带，GET 又已移除，
+  // 因此跨站无法再伪造登出请求；同源场景本就是可信上下文。
+  // GET 显式回 405（而不是掉到 SPA 代理回 200，避免语义含糊）。
+  app.get('/gateway/logout', (_req, res) => {
+    res.status(405).type('html').send('405 Method Not Allowed');
+  });
+  app.post('/gateway/logout', (req, res) => {
     // F-04：服务端吊销——登出的 token 立即失效（黑名单 12h），
     // 即使 Cookie 已被攻击者复制，该 token 也无法再通过认证门卫
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     if (token) revokeToken(token);
-    res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; Max-Age=0`);
+    res.setHeader('Set-Cookie', `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
     res.redirect(302, '/gateway/login');
   });
 
@@ -958,10 +999,13 @@ export function createGatewayServer(
   });
 
   // ── 留言列表（所有登录用户；按收件人过滤） ─────────────────────
+  // 支持 ?since=<id> 增量拉取（客户端轮询只取新增消息，避免每次全量下载）。
   app.get('/gateway/api/messages', (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
-    const all = db.listMessages(300);
+    const sinceRaw = typeof req.query.since === 'string' ? Number(req.query.since) : NaN;
+    const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
+    const all = since > 0 ? db.listMessagesAfter(since, 300) : db.listMessages(300);
     const mine = all.filter(
       (m) => m.recipient_id === null || m.recipient_id === me.userId || m.sender_id === me.userId,
     );
@@ -969,9 +1013,20 @@ export function createGatewayServer(
   });
 
   // ── 发送留言（所有登录用户） ─────────────────────────────────
+  // F-22：留言洪泛限流——每用户 60 秒内最多 12 条（滑动窗口），防止刷爆广播栏。
+  const msgRate = new Map<number, number[]>();
   app.post('/gateway/api/messages', jsonBody, (req, res) => {
     const me = apiAuth(req, res);
     if (!me) return;
+    const now = Date.now();
+    const recent = (msgRate.get(me.userId) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= 12) {
+      msgRate.set(me.userId, recent);
+      res.status(429).json({ ok: false, code: 'RATE_LIMITED', error: '留言过于频繁，请稍后再试' });
+      return;
+    }
+    recent.push(now);
+    msgRate.set(me.userId, recent);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const content = typeof body.content === 'string' ? body.content.trim() : '';
     if (content === '') {
@@ -1001,7 +1056,24 @@ export function createGatewayServer(
     res.write(`data: ${JSON.stringify({ type: 'init', me: { id: me.userId, username: me.username, role: me.role } })}\n\n`);
     const client = { res, userId: me.userId };
     chatClients.add(client);
-    req.on('close', () => chatClients.delete(client));
+    // 心跳：25 秒一条 SSE 注释帧。既防止代理/负载均衡器把空闲连接杀掉，
+    // 也用于探活——write 失败说明连接已死，立即移除，避免僵尸连接缓慢积累。
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        clearInterval(heartbeat);
+        chatClients.delete(client);
+      }
+    }, 25_000);
+    heartbeat.unref();
+    // req/res 双监听 close（断网无 FIN 时 res.close 兜底），清理幂等
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      chatClients.delete(client);
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
   });
 
   // ── 认证门卫：非 /gateway 请求必须带有效会话 ─────────────────
@@ -1072,6 +1144,8 @@ export function createGatewayServer(
       // 权限判定的 pathname：仍用 WHATWG 归一化（. / .. 已折叠），供下方
       // isUploadRequest / isGitRequest / 白名单等匹配；gate 前缀判定不受影响
       const parsed = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      // F-25：会话归属记录需要所有登录用户（含主用户）的用户 id；权限行仍只挂子用户
+      (req as Req).dshpwUser = user.userId;
       if (row.role !== 'admin') {
         const perms = effectivePermissions(user.userId);
         const lang = langOf(req);
@@ -1127,8 +1201,7 @@ export function createGatewayServer(
             }
           }
         }
-        // 附上权限与用户，供后续文件夹限制中间件 / 代理 token 计量使用
-        (req as Req).dshpwUser = user.userId;
+        // 附上权限，供后续文件夹限制中间件 / 代理 token 计量使用
         (req as Req).dshpwPerms = perms;
       }
       return next();
@@ -1153,6 +1226,85 @@ export function createGatewayServer(
     if (h['content-length'] !== undefined && h['transfer-encoding'] !== undefined) delete h['content-length'];
     return h;
   }
+
+  /** 缓冲上游响应体的上限：超过则放弃改写（注入/过滤），转流式透传，保证内存有界 */
+  const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+  /**
+   * 缓冲上游响应：正常路径在 'end' 时调用 onEnd(body) 做改写/过滤；
+   * 若超过 MAX_BUFFER_BYTES（异常大的 HTML/JSON），自动放弃缓冲，
+   * 无缝切换为流式透传（不再注入/过滤，但连接不中断、内存有界）。
+   * 上游中途出错时销毁客户端连接（头未发出，无法再写错误页）。
+   */
+  function bufferUpstream(
+    upstreamRes: http.IncomingMessage,
+    res: Response,
+    onEnd: (body: Buffer) => void,
+  ): void {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const onData = (chunk: Buffer) => {
+      if (settled) return;
+      size += chunk.length;
+      if (size > MAX_BUFFER_BYTES) {
+        settled = true;
+        upstreamRes.off('data', onData);
+        upstreamRes.off('end', onEndHandler);
+        upstreamRes.off('error', onError);
+        const respHeaders = headersForStreaming(upstreamRes.headers);
+        if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+        if (!res.writableEnded) {
+          res.write(Buffer.concat(chunks));
+          upstreamRes.pipe(res);
+        }
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEndHandler = () => {
+      if (settled) return;
+      settled = true;
+      onEnd(Buffer.concat(chunks));
+    };
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      res.destroy();
+    };
+    upstreamRes.on('data', onData);
+    upstreamRes.on('end', onEndHandler);
+    upstreamRes.on('error', onError);
+  }
+
+  /**
+   * F-26：向 dsh 注入会话沙盒（loopback + 内部密钥，fire-and-forget）。
+   * 受限子用户（sandbox_mode 非空）建会话后，dsh 默认给 workspace-write 沙盒——
+   * 这里通知 dsh 插件把该会话的 sandbox/mode 事件追加为其真实授权级别。
+   * 插件侧校验 loopback + x-internal-secret（与 SETUP_KEY 同源派生）。
+   */
+  function applySandboxToSession(sessionId: string, mode: string): void {
+    const body = JSON.stringify({ sessionId, mode });
+    const r = http.request(
+      {
+        hostname: upstreamHost,
+        port: upstreamPort,
+        path: '/api/dsh-passwords/internal/sandbox',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String(Buffer.byteLength(body)),
+          'x-internal-secret': config.internalSecret,
+        },
+        timeout: 3000,
+      },
+      () => {},
+    );
+    r.on('error', () => {});
+    r.on('timeout', () => r.destroy());
+    r.end(body);
+  }
+
   app.use((req, res) => {
     const headers: Record<string, string | string[] | undefined> = { ...req.headers };
     // 改写 Host 为上游地址（过 dsh 的 browser-trust fence 第 1 道：Host 检查）
@@ -1203,11 +1355,9 @@ export function createGatewayServer(
 
         // ── HTML 响应：缓冲 + 注入兼容脚本（crypto.randomUUID polyfill 等） ──
         if (contentType.includes('text/html')) {
-          const chunks: Buffer[] = [];
-          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
-          upstreamRes.on('end', () => {
+          bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = Buffer.concat(chunks);
+              let body = raw;
               if (encoding.includes('gzip')) body = zlib.gunzipSync(body);
               const html = body.toString('utf8');
               const injected = html.replace(/<head[^>]*>/i, (match) => match + INJECT_SCRIPT);
@@ -1234,19 +1384,14 @@ export function createGatewayServer(
               res.destroy();
             }
           });
-          upstreamRes.on('error', () => {
-            res.destroy();
-          });
           return;
         }
 
         // ── workspace.list 响应：收集 id→path 缓存 + 受限子用户过滤白名单外的工作区 ──
         if (req.method === 'POST' && /^\/api\/workspace[.\/]list$/.test(parsedUrl.pathname)) {
-          const chunks: Buffer[] = [];
-          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
-          upstreamRes.on('end', () => {
+          bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = Buffer.concat(chunks);
+              let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
@@ -1257,37 +1402,69 @@ export function createGatewayServer(
               const outBody = restricted
                 ? filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'path')
                 : parsed;
+              // F-25：archivedSessionIds 把他人会话 ID 直接漏给子用户（枚举源），一律清空
+              if (reqAs.dshpwPerms !== undefined) stripArchivedSessionIds(outBody);
               const out = Buffer.from(JSON.stringify(outBody), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
               if (!res.writableEnded) res.end(out);
             } catch {
+              // 解析失败（非 JSON 上游响应）：原样透传，不篡改
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(Buffer.concat(chunks));
+              if (!res.writableEnded) res.end(raw);
             }
           });
-          upstreamRes.on('error', () => res.destroy());
           return;
         }
 
-        // ── session.list 响应过滤：受限子用户只看得到白名单内工作区的会话 ──
+        // ── session.create / fork 响应：记录会话归属（F-25）+ 注入真实沙盒（F-26） ──
+        // 响应体不变（原样转发），只做两个副作用：
+        //   1) sessionId → 创建者 user_id 写入 session_owner（含主用户，保证其新会话不被子用户读）
+        //   2) 受限子用户（sandbox_mode 非空）→ 通知 dsh 插件追加 sandbox/mode 事件
+        if (req.method === 'POST' && /^\/api\/session[.\/](create|fork)$/.test(parsedUrl.pathname)) {
+          bufferUpstream(upstreamRes, res, (raw) => {
+            try {
+              const enc = String(upstreamRes.headers['content-encoding'] ?? '');
+              const decoded = enc.includes('gzip') ? zlib.gunzipSync(raw) : raw;
+              const parsed = JSON.parse(decoded.toString('utf8'));
+              const sessionId = extractSessionId(parsed);
+              if (sessionId !== null && reqAs.dshpwUser !== undefined) {
+                db.setSessionOwner(sessionId, reqAs.dshpwUser);
+                if (reqAs.dshpwPerms !== undefined && reqAs.dshpwPerms.sandbox_mode !== null) {
+                  applySandboxToSession(sessionId, reqAs.dshpwPerms.sandbox_mode);
+                }
+              }
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+            } catch {
+              // 非 JSON 响应：原样透传，副作用（归属/沙盒）缺失但连接正常
+              const respHeaders = headersForStreaming(upstreamRes.headers);
+              if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
+              if (!res.writableEnded) res.end(raw);
+            }
+          });
+          return;
+        }
+
+        // ── session.list 响应过滤：子用户只看得到自己拥有的会话（F-25）──
+        // 归属未记录的旧会话（本修复前创建）对子用户也不可见（fail-closed）；
+        // 主用户不受限。这样侧栏不会再泄露其他用户/主用户的会话列表。
         if (
           reqAs.dshpwPerms !== undefined &&
-          isWorkspaceRestricted(reqAs.dshpwPerms.allowed_folders) &&
           req.method === 'POST' &&
           /^\/api\/session[.\/]list$/.test(parsedUrl.pathname)
         ) {
-          const chunks: Buffer[] = [];
-          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
-          upstreamRes.on('end', () => {
+          bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = Buffer.concat(chunks);
+              let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
-              const filtered = filterByPathField(parsed, reqAs.dshpwPerms!.allowed_folders, 'cwd');
+              const caller = reqAs.dshpwUser!;
+              const filtered = filterSessionItems(parsed, (id) => db.getSessionOwner(id) === caller);
               const out = Buffer.from(JSON.stringify(filtered), 'utf8');
               const respHeaders = headersForRewrittenBody(upstreamRes.headers);
               respHeaders['content-length'] = String(out.length);
@@ -1296,10 +1473,9 @@ export function createGatewayServer(
             } catch {
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(Buffer.concat(chunks));
+              if (!res.writableEnded) res.end(raw);
             }
           });
-          upstreamRes.on('error', () => res.destroy());
           return;
         }
 
@@ -1313,11 +1489,9 @@ export function createGatewayServer(
           req.method === 'POST' &&
           /^\/api\/session[.\/]history$/.test(parsedUrl.pathname)
         ) {
-          const chunks: Buffer[] = [];
-          upstreamRes.on('data', (chunk: Buffer) => chunks.push(chunk));
-          upstreamRes.on('end', () => {
+          bufferUpstream(upstreamRes, res, (raw) => {
             try {
-              let body = Buffer.concat(chunks);
+              let body = raw;
               const enc = String(upstreamRes.headers['content-encoding'] ?? '');
               if (enc.includes('gzip')) body = zlib.gunzipSync(body);
               const parsed = JSON.parse(body.toString('utf8'));
@@ -1333,10 +1507,9 @@ export function createGatewayServer(
             } catch {
               const respHeaders = headersForStreaming(upstreamRes.headers);
               if (!res.headersSent) res.writeHead(upstreamRes.statusCode ?? 200, respHeaders);
-              if (!res.writableEnded) res.end(Buffer.concat(chunks));
+              if (!res.writableEnded) res.end(raw);
             }
           });
-          upstreamRes.on('error', () => res.destroy());
           return;
         }
 
@@ -1408,8 +1581,14 @@ export function createGatewayServer(
       reqAs.dshpwPerms.sandbox_mode !== null &&
       (req.method === 'POST' || req.method === 'PUT') &&
       /^\/api\/respond$/.test(parsedUrl.pathname);
+    // F-25：会话作用域 RPC（history/prompt/respond/archive/delete/rename/fork 等）
+    // 必须命中 session_owner 且属本人，否则封堵跨租户读写任意会话。
+    const needsOwnershipCheck =
+      reqAs.dshpwPerms !== undefined &&
+      (req.method === 'POST' || req.method === 'PUT') &&
+      SESSION_SCOPED_RE.test(parsedUrl.pathname);
 
-    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck) {
+    if (needsFolderCheck || needsSandboxCheck || needsCommandCheck || needsApprovalCheck || needsOwnershipCheck) {
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;
@@ -1417,7 +1596,15 @@ export function createGatewayServer(
       // aionui-panel 写文件（/write）可能携带大 JSON，单独放宽上限并完整检查；
       // 其余需要检查的端点 body 天然很小（session.create/settings.mutate/respond），
       // 超限即 fail-closed，防止“超限透传”绕过权限检查。
-      const bodyLimit = isAionuiPanel(parsedUrl.pathname) ? 4 * 1024 * 1024 : MAX_BODY;
+      // 会话归属检查的端点（session.prompt 等）可能携带较长提示词，单独放宽到 1MB，
+      // 避免误伤正常长输入（仍远小于 aionui 的 4MB，内存面可控）。
+      const ownershipOnly =
+        needsOwnershipCheck && !needsFolderCheck && !needsSandboxCheck && !needsCommandCheck && !needsApprovalCheck;
+      const bodyLimit = isAionuiPanel(parsedUrl.pathname)
+        ? 4 * 1024 * 1024
+        : ownershipOnly
+          ? 1024 * 1024
+          : MAX_BODY;
       req.on('data', (chunk: Buffer) => {
         if (settled) return;
         size += chunk.length;
@@ -1520,6 +1707,17 @@ export function createGatewayServer(
           }
         }
 
+        // F-25：会话归属校验——非本用户拥有的会话一律 403（历史旧会话无归属记录
+        // 也拒绝，fail-closed；主用户不受限）。
+        if (needsOwnershipCheck && bodyObj !== null) {
+          const sessionId = extractSessionId(bodyObj) ?? parsedUrl.searchParams.get('sessionId');
+          if (sessionId === null || db.getSessionOwner(sessionId) !== reqAs.dshpwUser) {
+            upstreamReq.destroy();
+            res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+            return;
+          }
+        }
+
         upstreamReq.end(forwardBody);
       });
       req.on('error', () => {
@@ -1573,17 +1771,48 @@ export function createGatewayServer(
   server.requestTimeout = 60_000;
   server.maxConnections = 512;
 
+  // ── 内存结构周期性清理（防长期运行缓慢积累） ───────────────────
+  // sessionCache / revokedTokens / usageThrottle / usageReportThrottle /
+  // setupAttempts / msgRate 都以 token / IP / userId 为键，平时按需淘汰，
+  // 这里兑底每 10 分钟全量扫一遍过期条目：内存面与活跃用户数成正比，
+  // 而不是与进程运行时长成正比。定时器 unref，不阻碍进程退出。
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of sessionCache) if (v.expireAt <= now) sessionCache.delete(k);
+    for (const [k, v] of revokedTokens) if (v <= now) revokedTokens.delete(k);
+    for (const [k, v] of usageThrottle) if (now - v > 3600_000) usageThrottle.delete(k);
+    for (const [k, v] of usageReportThrottle) if (now - v > 3600_000) usageReportThrottle.delete(k);
+    for (const [k, v] of setupAttempts) {
+      const keep = v.filter((t) => now - t < SETUP_WINDOW_MS);
+      if (keep.length > 0) setupAttempts.set(k, keep);
+      else setupAttempts.delete(k);
+    }
+    for (const [k, v] of msgRate) {
+      const keep = v.filter((t) => now - t < 60_000);
+      if (keep.length > 0) msgRate.set(k, keep);
+      else msgRate.delete(k);
+    }
+  }, 10 * 60_000);
+  sweep.unref();
+  server.on('close', () => clearInterval(sweep));
+
   // ── WebSocket 升级代理（dsh 前端依赖 WS 通信） ──────────────
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    if (url.pathname.startsWith('/gateway/')) {
+    // F-03 同口径：网关前缀判定与转发路径都用「原始路径迭代解码 + 压平
+    // 斜杠 + WHATWG 归一化」，与 HTTP 代理保持一致，杜绝 %2f/%2e 变体
+    // 在 WS 升级请求里漂移（HTTP 侧已修，这里补齐同口径）。
+    const rawPath = (req.url ?? '/').split('?')[0];
+    const gatePath = normalizeDecodedPath(rawPath);
+    if (gatePath === '/gateway' || gatePath.startsWith('/gateway/')) {
       socket.destroy();
       return;
     }
-    // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned）
+    const queryIndex = (req.url ?? '').indexOf('?');
+    const fwdPath = gatePath + (queryIndex >= 0 ? (req.url ?? '').slice(queryIndex) : '');
+    // 认证检查（复用 Cookie；与 HTTP 侧一致：校验 cv + banned + 登出吊销）
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
     let authed = false;
-    if (token) {
+    if (token && !isTokenRevoked(token)) {
       try {
         const user = auth.verifyToken(token);
         const row = db.getUserByUsername(user.username);
@@ -1604,7 +1833,7 @@ export function createGatewayServer(
     // 转发升级请求（Host/Origin 改写，同 HTTP 路径；路径已规范化）
     const upstreamSocket = net.connect(upstreamPort, upstreamHost, () => {
       const lines: string[] = [
-        `${req.method ?? 'GET'} ${url.pathname + url.search} HTTP/1.1`,
+        `${req.method ?? 'GET'} ${fwdPath} HTTP/1.1`,
       ];
       for (const [key, value] of Object.entries(req.headers)) {
         const lower = key.toLowerCase();

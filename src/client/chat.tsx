@@ -86,7 +86,11 @@ export function ChatLauncher(props: PropsLocale<'dshpw'>) {
     let disposed = false;
 
     const load = () => {
-      fetch('/gateway/api/messages')
+      // 增量拉取：服务端只返回 id > since 的新消息（第一次全量拿基线），
+      // 避免每 4 秒轮询都全量下载最近 300 条留言（长期挂机 = 长期无谓带宽/CPU）。
+      const since = lastSeenId.current;
+      const url = '/gateway/api/messages' + (since > 0 ? '?since=' + since : '');
+      fetch(url)
         .then(async (res) => {
           const d = await res.json().catch(() => ({}));
           if (disposed) return;
@@ -313,10 +317,10 @@ const CHAT_CSS = `
 .dshpw-chat-inputrow{display:flex;gap:8px}
 .dshpw-chat-input{flex:1;box-sizing:border-box;min-width:0;padding:8px 12px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;outline:none;transition:border-color .15s,box-shadow .15s}
 .dshpw-chat-input:focus{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent)}
-.dshpw-chat-send{appearance:none;border:0;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:500;background:var(--dsw-alias-brand-primary);color:#fff;cursor:pointer;transition:filter .15s}
+.dshpw-chat-send{appearance:none;border:0;border-radius:10px;padding:8px 16px;font-size:13px;font-weight:500;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-inverted,#fff);cursor:pointer;transition:filter .15s}
 .dshpw-chat-send:hover:not(:disabled){filter:brightness(1.08)}
 .dshpw-chat-send:disabled{opacity:.4;cursor:default}
-.dshpw-chat-error{font-size:12px;color:var(--dsw-alias-label-error)}
+.dshpw-chat-error{font-size:12px;color:var(--dsw-alias-state-error-primary,#ef4444)}
 @keyframes dshpwChatFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes dshpwChatPanelIn{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
 @keyframes dshpwMsgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}

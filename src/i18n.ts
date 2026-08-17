@@ -243,7 +243,17 @@ export function t(lang: Lang, key: string, params?: Params): string {
  * （zh | en，dsh 设置页 General → Language 写入）。读不到返回 null。
  * 与 gateway.ts 里读 ui-theme.preference 用的是同一套候选路径逻辑。
  */
+let localePreferenceCache: { value: Lang | null; at: number } | null = null;
+const LOCALE_CACHE_TTL_MS = 5_000;
+
 function readDshLocalePreference(): Lang | null {
+  // 每个网关请求都会经过 resolveGatewayLang（子用户限权/错误页等路径都要
+  // 取语言），每请求一次同步读 settings.yaml 是不必要的磁盘开销；
+  // 缓存 5 秒，语言切换最多延迟 5 秒生效（与 gateway.ts 主题缓存同口径）。
+  const now = Date.now();
+  if (localePreferenceCache !== null && now - localePreferenceCache.at < LOCALE_CACHE_TTL_MS) {
+    return localePreferenceCache.value;
+  }
   const explicit = process.env.MCP_DSH_SETTINGS_FILE?.trim();
   const dshHome = process.env.DSH_HOME?.trim();
   const candidates: string[] = explicit
@@ -252,6 +262,7 @@ function readDshLocalePreference(): Lang | null {
         ...(dshHome ? [path.join(dshHome, 'settings.yaml')] : []),
         path.join(os.homedir(), '.dsh', 'settings.yaml'),
       ];
+  let value: Lang | null = null;
   for (const file of candidates) {
     try {
       const text = readFileSync(file, 'utf8');
@@ -260,12 +271,16 @@ function readDshLocalePreference(): Lang | null {
       if (!block || block.index === undefined) continue;
       const rest = text.slice(block.index);
       const hit = rest.match(/^\s+preference\s*:\s*["']?(zh|en)["']?\s*(?:#.*)?$/m);
-      if (hit) return hit[1] as Lang;
+      if (hit) {
+        value = hit[1] as Lang;
+        break;
+      }
     } catch {
       // 文件不存在/不可读：继续尝试下一个候选
     }
   }
-  return null;
+  localePreferenceCache = { value, at: now };
+  return value;
 }
 
 function parseAcceptLanguage(header: string | null | undefined): string | null {

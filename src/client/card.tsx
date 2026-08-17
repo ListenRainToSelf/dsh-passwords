@@ -1,6 +1,6 @@
 // dsh-passwords 设置卡片：可折叠（与官方 PluginCard 同形态：header 按钮 +
 // aria-expanded + 展开才渲染 body）。内容：
-//   - 远程设置补丁：状态 + "重载补丁"按钮（任何登录用户可触发；补丁强制启用）
+//   - 远程设置补丁：状态（所有用户可见）+ "重载补丁"按钮（仅主用户；F-02）
 //   - 用户管理：改密/改名/子用户分配（主用户 admin 可管理所有，子用户只能改自己）
 // 数据面：/api/dsh-passwords/*（网关注入的 JWT cookie 鉴权）。
 //
@@ -199,10 +199,16 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
 
   useEffect(() => {
     refresh();
-    // 展开状态下定期刷新：主用户在别处修改子用户权限/工作区后本面板自动同步
+  }, []);
+
+  // 展开状态下定期刷新（收起时不轮询，避免设置页长期挂着产生无用请求）；
+  // 主用户在别处修改子用户权限/工作区后，展开即拉最新 + 每 30 秒自动同步
+  useEffect(() => {
+    if (!open) return;
+    refresh();
     const timer = window.setInterval(refresh, 30_000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [open]);
 
   const isAdmin = data?.me?.role === 'admin';
   const me = data?.me?.username ?? '';
@@ -222,7 +228,7 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
     }
   };
 
-  /** 重载补丁：任何登录用户可触发；网关重打补丁并重启 dsh 网页服务，页面稍后自动刷新 */
+  /** 重载补丁（仅主用户：服务端 F-02 限 admin + 10 分钟冷却；子用户不显示按钮） */
   const reloadPatch = () => {
     void run(async () => {
       await api('/api/dsh-passwords/patch/reload', {});
@@ -367,7 +373,9 @@ export function DshPasswordsCard(props: PropsLocale<'dshpw'>) {
         'div',
         { className: 'dshpw-row' },
         h('span', { className: patchOk ? 'dshpw-ok' : 'dshpw-error' }, patchText),
-        h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
+        // F-02：重载补丁会重启 dsh 网页服务，仅主用户可触发；子用户只读状态
+        isAdmin &&
+          h('button', { className: 'dshpw-btn', disabled: busy, onClick: reloadPatch }, t('reloadPatch')),
       ),
       h('div', { className: 'dshpw-hint' }, t('patchHint1'), ' ', t('patchHint2')),
     ),
