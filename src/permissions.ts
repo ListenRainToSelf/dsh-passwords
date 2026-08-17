@@ -57,9 +57,10 @@ export function folderAllowed(path: string, allowedFolders: string[]): boolean {
 /**
  * 递归过滤 JSON 里路径字段不在白名单的对象（session.list 用 field='cwd'，workspace.list 用 field='path'）：
  * 只对数组元素中带该路径字段的对象做白名单判定，白名单外的直接丢弃；其余字段原样递归保留。
- * 字段缺失/空串（无工作区）不拦截。
+ * depth 上限 8：防上游投毒深嵌套 JSON 导致栈溢出 DoS（与同文件其他递归函数口径一致）。
  */
-export function filterByPathField(value: unknown, allowedFolders: string[], field: string): unknown {
+export function filterByPathField(value: unknown, allowedFolders: string[], field: string, depth = 0): unknown {
+  if (depth > 8 || value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const item of value) {
@@ -72,29 +73,31 @@ export function filterByPathField(value: unknown, allowedFolders: string[], fiel
       ) {
         continue;
       }
-      out.push(filterByPathField(item, allowedFolders, field));
+      out.push(filterByPathField(item, allowedFolders, field, depth + 1));
     }
     return out;
   }
-  if (value !== null && typeof value === 'object') {
+  if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = filterByPathField(v, allowedFolders, field);
+      out[k] = filterByPathField(v, allowedFolders, field, depth + 1);
     }
     return out;
   }
   return value;
 }
 
-/** 递归收集 {id, path} 对（workspace.list 响应用，建 workspaceId → 路径 映射） */
-export function collectIdPathPairs(value: unknown, out: Map<string, string> = new Map()): Map<string, string> {
+/** 递归收集 {id, path} 对（workspace.list 响应用，建 workspaceId → 路径 映射）
+ *  depth 上限 8：与 filterByPathField 同口径 */
+export function collectIdPathPairs(value: unknown, out: Map<string, string> = new Map(), depth = 0): Map<string, string> {
+  if (depth > 8 || value === null) return out;
   if (Array.isArray(value)) {
-    for (const item of value) collectIdPathPairs(item, out);
-  } else if (value !== null && typeof value === 'object') {
+    for (const item of value) collectIdPathPairs(item, out, depth + 1);
+  } else if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
     if (typeof obj.id === 'string' && typeof obj.path === 'string') out.set(obj.id, obj.path);
-    for (const v of Object.values(obj)) collectIdPathPairs(v, out);
+    for (const v of Object.values(obj)) collectIdPathPairs(v, out, depth + 1);
   }
   return out;
 }
@@ -397,21 +400,24 @@ export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
 }
 
 /**
- * 递归过滤会话条目（同时带字符串 sessionId 与 cwd 的对象，session.list 响应）：
+ * 递归过滤会话条目（带 sessionId 字符串字段的对象，session.list 响应）：
  * keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
+ * 只要 sessionId 是字符串就执行归属判定（不再要求 cwd 必填——
+ *  无工作区的会话也要归属校验，否则侧栏泄露他人会话标题）。
  * 注意：typert 线上格式的会话条目是 { sessionId, cwd, ... }（不是 id）。
  */
 export function filterSessionItems(value: unknown, keep: (id: string) => boolean, depth = 0): unknown {
-  if (depth > 8 || value === null || typeof value !== 'object') return value;
+  if (depth > 8 || value === null) return value;
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (const item of value) {
       const obj = item as Record<string, unknown> | null;
+      // 只要 sessionId 是字符串就走归属判定（fail-closed：归属不在本人 → 整条丢弃）
       if (
         obj !== null &&
         typeof obj === 'object' &&
         typeof obj.sessionId === 'string' &&
-        typeof obj.cwd === 'string' &&
+        obj.sessionId.length > 0 &&
         !keep(obj.sessionId)
       ) {
         continue;
@@ -420,12 +426,15 @@ export function filterSessionItems(value: unknown, keep: (id: string) => boolean
     }
     return out;
   }
-  const obj = value as Record<string, unknown>;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k] = filterSessionItems(v, keep, depth + 1);
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = filterSessionItems(v, keep, depth + 1);
+    }
+    return out;
   }
-  return out;
+  return value;
 }
 
 /** 请求体里可能携带目标路径的字段名（按优先级） */

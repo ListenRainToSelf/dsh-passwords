@@ -207,9 +207,18 @@ export function hardenSecretsAfterSetup(config: PlatformConfig): void {
         out.push(`SETUP_KEY=${newSetupKey}`); // 轮换
         continue;
       }
-      if (freeze[key] !== undefined && m[2] === '') {
-        out.push(`${key}=${freeze[key]}`); // 空值补成当前生效值
-        continue;
+      if (freeze[key] !== undefined) {
+        // 按 dotenv 规则剥离引号 / `#` 注释后再判空：
+        //   MCP_DB_ENC_KEY=""   → 空  → 固化当前生效值
+        //   MCP_DB_ENC_KEY=     → 空  → 固化当前生效值
+        //   MCP_DB_ENC_KEY= # x → 空  → 固化当前生效值（防止 dotenv 把注释当空值）
+        // 之前 m[2] !== '' 的裸等会把引号空 / 注释空当"有值"，不固化，
+        // 轮换 SETUP_KEY 后历史加密数据永久不可解密。
+        const stripped = m[2].replace(/^['"]|['"]$/g, '').replace(/\s+#.*$/, '').trim();
+        if (stripped === '') {
+          out.push(`${key}=${freeze[key]}`); // 空值补成当前生效值
+          continue;
+        }
       }
     }
     out.push(line);

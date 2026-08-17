@@ -1184,7 +1184,8 @@ export function createGatewayServer(
         // aionui-panel 文件树：GET/HEAD 的 root 在 query 里，直接校验白名单（拦截目录浏览/下载）
         if (isWorkspaceRestricted(perms.allowed_folders) && (req.method === 'GET' || req.method === 'HEAD')) {
           const aionuiRoot = aionuiRootFrom(req.method, parsed.pathname, parsed.searchParams, null);
-          if (aionuiRoot !== null && !folderAllowed(aionuiRoot, perms.allowed_folders)) {
+          // 提取不到 root 时也 fail-closed（之前直接放行→白名单外的目录可被下载）
+          if (aionuiRoot === null || !folderAllowed(aionuiRoot, perms.allowed_folders)) {
             res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
             return;
           }
@@ -1662,6 +1663,13 @@ export function createGatewayServer(
             if (targetPath === null) {
               const wid = extractWorkspaceId(bodyObj);
               if (wid !== null) targetPath = workspacePathById.get(wid) ?? null;
+              // 既无路径字段也无 workspaceId（子用户用空 body 创会话）→ fail-closed：
+              // 不能跳过白名单校验后透传，否则可创建到白名单外的工作区
+              if (wid === null && targetPath === null) {
+                upstreamReq.destroy();
+                res.status(403).type('html').send(forbiddenPage(lang, t(lang, 'gw.folderDenied')));
+                return;
+              }
               // 缓存里没有该 workspaceId 的映射（进程重启后/从未有 workspace.list
               // 经过网关）：无法确认目标目录在白名单内，fail-closed 拒绝
               if (wid !== null && targetPath === null) {

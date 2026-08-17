@@ -890,10 +890,12 @@ export class Database {
   }
 
   // ── 会话归属（F-25）：记录创建者 / 查询创建者 ──────────────────
-  /** 会话创建时记录归属（幂等；fork 出的新会话同样走这里） */
+  /** 会话创建时记录归属（幂等；fork 出的新会话同样走这里）
+   *  ON CONFLICT DO NOTHING：禁止覆盖已有归属——避免 dsh 侧会话 ID 可被
+   *  客户端指定时，攻击者把他人会话归属改为自己（夺会话）。 */
   setSessionOwner(sessionId: string, userId: number): void {
     this.stmt(
-      'INSERT INTO session_owner (session_id, user_id) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET user_id = excluded.user_id',
+      'INSERT INTO session_owner (session_id, user_id) VALUES (?, ?) ON CONFLICT(session_id) DO NOTHING',
     ).run(sessionId, userId);
   }
 
