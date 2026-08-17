@@ -4,8 +4,8 @@
 //   2. /api/dsh-passwords/patch/* 远程设置补丁路由：
 //      - GET  /patch/status → 补丁当前状态（任何登录用户可看）
 //      - POST /patch/reload → 通知网关重载补丁并重启 dsh 网页服务
-//        （任何登录用户可触发；补丁强制启用，无开关）
-//      dsh 升级覆盖补丁后，用户在设置页点"重载补丁"即可，无需登录服务器。
+//        （仅主用户可触发，10 分钟冷却；补丁强制启用，无开关）
+//      dsh 升级覆盖补丁后，主用户在设置页点"重载补丁"即可，无需登录服务器。
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
@@ -14,6 +14,7 @@ import https from 'node:https';
 import net from 'node:net';
 import jwt from 'jsonwebtoken';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -473,6 +474,46 @@ export function apply(ctx: Context): void {
         } catch {
           writeJson(res, 200, { ok: true, workspaces: [] });
         }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/dsh-passwords/internal/sandbox',
+      handler: (req, res) => {
+        // F-26：仅网关进程（loopback + 内部密钥）可调——把受限子用户新会话的
+        // 沙盒从 dsh 默认的 workspace-write 降为其真实授权级别（append sandbox/mode）。
+        const remoteIp = req.socket.remoteAddress ?? '';
+        if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+          writeJson(res, 403, { ok: false, error: 'forbidden' });
+          return;
+        }
+        const secret = typeof req.headers['x-internal-secret'] === 'string' ? req.headers['x-internal-secret'] : '';
+        const a = Buffer.from(secret);
+        const b = Buffer.from(cfg.internalSecret);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
+          writeJson(res, 403, { ok: false, error: 'forbidden' });
+          return;
+        }
+        readJsonBody(req)
+          .then((body) => {
+            const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+            const mode = typeof body.mode === 'string' ? body.mode : '';
+            if (!sessionId || (mode !== 'read-only' && mode !== 'workspace-write' && mode !== 'danger-full-access')) {
+              writeJson(res, 400, { ok: false, error: 'invalid' });
+              return;
+            }
+            const sessions = ctx.get('sessions') as unknown as
+              | { get: (id: string) => { append: (type: string, data: unknown) => void } | undefined }
+              | undefined;
+            const session = sessions?.get(sessionId);
+            if (!session) {
+              writeJson(res, 404, { ok: false, error: 'no session' });
+              return;
+            }
+            session.append('sandbox/mode', { mode });
+            writeJson(res, 200, { ok: true });
+          })
+          .catch(() => writeJson(res, 400, { ok: false, error: 'bad body' }));
       },
     },
   ];

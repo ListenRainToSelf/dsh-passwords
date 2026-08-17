@@ -356,6 +356,78 @@ export function isWorkspaceWrite(pathname: string): boolean {
 /** 涉及创建/切换工作区的 dsh typert RPC（斜杠风格：/api/session/create 等；兼容点号风格） */
 export const WORKSPACE_ENDPOINT_RE = /^\/api\/session[.\/](create|fork)([.\/]|$)/;
 
+/**
+ * 会话作用域 RPC（F-25）：这些端点带一个 sessionId，能读/写/改某个会话——
+ * 子用户必须拥有该会话（session_owner 命中本人）才放行，否则跨租户读写任意会话。
+ * create 无源会话、list 单独按归属过滤，均不在此列。
+ */
+export const SESSION_SCOPED_RE = /^\/api\/session[.\/](history|prompt|respond|archive|delete|rename|retitle|title|resume|fork|truncate|export)([.\/]|$)/;
+
+/** 递归查找请求体里的 sessionId（typert wire 字段）；找不到返回 null */
+export function extractSessionId(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value === null || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  if (typeof obj.sessionId === 'string' && obj.sessionId.length > 0) return obj.sessionId;
+  for (const key of Object.keys(obj)) {
+    const nested = extractSessionId(obj[key], depth + 1);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+/**
+ * 递归清空 archivedSessionIds 数组（F-25 枚举源：workspace.list 把他人会话 ID
+ * 直接漏给受限子用户）。返回是否有改动。
+ */
+export function stripArchivedSessionIds(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  let changed = false;
+  if (Array.isArray(obj.archivedSessionIds) && obj.archivedSessionIds.length > 0) {
+    obj.archivedSessionIds = [];
+    changed = true;
+  }
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (v !== null && typeof v === 'object') {
+      if (stripArchivedSessionIds(v, depth + 1)) changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * 递归过滤会话条目（同时带字符串 sessionId 与 cwd 的对象，session.list 响应）：
+ * keep(id) 返回 false 时从所在数组移除。用于子用户只看得到自己拥有的会话。
+ * 注意：typert 线上格式的会话条目是 { sessionId, cwd, ... }（不是 id）。
+ */
+export function filterSessionItems(value: unknown, keep: (id: string) => boolean, depth = 0): unknown {
+  if (depth > 8 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const item of value) {
+      const obj = item as Record<string, unknown> | null;
+      if (
+        obj !== null &&
+        typeof obj === 'object' &&
+        typeof obj.sessionId === 'string' &&
+        typeof obj.cwd === 'string' &&
+        !keep(obj.sessionId)
+      ) {
+        continue;
+      }
+      out.push(filterSessionItems(item, keep, depth + 1));
+    }
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    out[k] = filterSessionItems(v, keep, depth + 1);
+  }
+  return out;
+}
+
 /** 请求体里可能携带目标路径的字段名（按优先级） */
 const PATH_FIELDS = [
   'cwd',

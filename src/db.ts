@@ -153,6 +153,13 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(id DESC);
+-- F-25：会话归属（sessionId → 创建者 user_id）。子用户访问会话作用域 RPC 前
+-- 必须命中此表且 user_id 为本人，否则 403（跨租户读写封堵）。
+CREATE TABLE IF NOT EXISTS session_owner (
+  session_id TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
 
 /** 安全解析 JSON 字符串数组（权限目录 / 留言标签）；损坏时返回空数组 */
@@ -480,6 +487,14 @@ export class Database {
   }
 
   deleteUser(id: number): void {
+    // 无外键约束（SQLite 未开 FK），关联行需手动级联清理：会话归属、
+    // 权限、用量、留言（发件人/收件人）。不清理会留下孤儿数据：
+    //   - session_owner 残留 → 子用户侧 keep() 命中已删 userId 不匹配 → 恰好 deny，但行永远占用空间
+    //   - messages 残留 → 联表 JOIN 不出用户名，列表永远少消息
+    this.stmt('DELETE FROM session_owner WHERE user_id = ?').run(id);
+    this.stmt('DELETE FROM user_permissions WHERE user_id = ?').run(id);
+    this.stmt('DELETE FROM user_usage WHERE user_id = ?').run(id);
+    this.stmt('DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?').run(id, id);
     this.stmt('DELETE FROM users WHERE id = ?').run(id);
   }
 
@@ -508,6 +523,11 @@ export class Database {
   }
 
   // ── 网络安全审查：审计日志（敏感字段静态加密） ────────────────
+  /** 审计写入计数：每 500 条修剪一次最旧记录（上限保护，防长期运行/攻击刷爆磁盘） */
+  private auditInsertCount = 0;
+  private static readonly AUDIT_MAX_ROWS = 50_000;
+  private static readonly AUDIT_PRUNE_EVERY = 500;
+
   audit(
     eventType: string,
     opts: { username?: string | null; ip?: string | null; userAgent?: string | null; detail?: string | null } = {},
@@ -522,6 +542,16 @@ export class Database {
         this.crypto.encrypt(opts.userAgent ?? null),
         this.crypto.encrypt(opts.detail ?? null),
       );
+      this.auditInsertCount++;
+      if (this.auditInsertCount % Database.AUDIT_PRUNE_EVERY === 0) {
+        try {
+          this.stmt('DELETE FROM audit_logs WHERE id <= (SELECT MAX(id) - ? FROM audit_logs)').run(
+            Database.AUDIT_MAX_ROWS,
+          );
+        } catch {
+          // 修剪失败不影响审计主流程（下次再试）
+        }
+      }
     } catch {
       // 审计写入失败不阻断主流程
     }
@@ -783,11 +813,30 @@ export class Database {
 
   // ── 留言 / 聊天 ───────────────────────────────────────────
   listMessages(limit = 100): MessageRow[] {
-    const rows = this.stmt(
-      `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
+    return this.mapMessageRows(
+      this.stmt(
+        `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
        FROM messages m JOIN users u ON u.id = m.sender_id
        ORDER BY m.id DESC LIMIT ?`,
-    ).all(Math.min(Math.max(limit, 1), 500)) as unknown as {
+      ).all(Math.min(Math.max(limit, 1), 500)),
+    );
+  }
+
+  /** 增量拉取：只返回 id > sinceId 的消息（升序），供客户端轮询避免全量下载 */
+  listMessagesAfter(sinceId: number, limit = 300): MessageRow[] {
+    return this.mapMessageRows(
+      this.stmt(
+        `SELECT m.id, m.sender_id, u.username, m.recipient_id, m.content, m.tags, m.created_at
+       FROM messages m JOIN users u ON u.id = m.sender_id
+       WHERE m.id > ? ORDER BY m.id ASC LIMIT ?`,
+      ).all(sinceId, Math.min(Math.max(limit, 1), 500)),
+    );
+  }
+
+  private mapMessageRows(
+    rows: unknown,
+  ): MessageRow[] {
+    return (rows as {
       id: number;
       sender_id: number;
       username: string;
@@ -795,8 +844,7 @@ export class Database {
       content: string;
       tags: string;
       created_at: string;
-    }[];
-    return rows.map((row) => ({
+    }[]).map((row) => ({
       id: row.id,
       sender_id: row.sender_id,
       sender_name: this.crypto.decrypt(row.username) ?? '',
@@ -807,6 +855,11 @@ export class Database {
     }));
   }
 
+  /** 留言写入计数：每 100 条修剪一次最旧记录（留言表长期运行也会无限增长） */
+  private messageInsertCount = 0;
+  private static readonly MESSAGES_MAX_ROWS = 2_000;
+  private static readonly MESSAGES_PRUNE_EVERY = 100;
+
   addMessage(senderId: number, recipientId: number | null, content: string, tags: string[]): MessageRow {
     const result = this.stmt('INSERT INTO messages (sender_id, recipient_id, content, tags) VALUES (?, ?, ?, ?)').run(
       senderId,
@@ -814,6 +867,16 @@ export class Database {
       content,
       JSON.stringify(tags),
     );
+    this.messageInsertCount++;
+    if (this.messageInsertCount % Database.MESSAGES_PRUNE_EVERY === 0) {
+      try {
+        this.stmt('DELETE FROM messages WHERE id <= (SELECT MAX(id) - ? FROM messages)').run(
+          Database.MESSAGES_MAX_ROWS,
+        );
+      } catch {
+        // 修剪失败不影响发送主流程
+      }
+    }
     const sender = this.getUserById(senderId);
     return {
       id: Number(result.lastInsertRowid),
@@ -824,5 +887,21 @@ export class Database {
       tags,
       created_at: new Date().toISOString(),
     };
+  }
+
+  // ── 会话归属（F-25）：记录创建者 / 查询创建者 ──────────────────
+  /** 会话创建时记录归属（幂等；fork 出的新会话同样走这里） */
+  setSessionOwner(sessionId: string, userId: number): void {
+    this.stmt(
+      'INSERT INTO session_owner (session_id, user_id) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET user_id = excluded.user_id',
+    ).run(sessionId, userId);
+  }
+
+  /** 查询会话创建者 user_id；旧会话（本修复之前创建）无记录返回 null */
+  getSessionOwner(sessionId: string): number | null {
+    const row = this.stmt('SELECT user_id FROM session_owner WHERE session_id = ?').get(sessionId) as
+      | { user_id: number }
+      | undefined;
+    return row ? Number(row.user_id) : null;
   }
 }
